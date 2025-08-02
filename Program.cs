@@ -433,7 +433,7 @@ public static class InteractionHandling
         }
 
         // After handling the weather, reset the flag
-        StateFlags.currentInputMode = StateFlags.InputMode.Normal;
+        // StateFlags.currentInputMode = StateFlags.InputMode.Normal;
     }
 }
 
@@ -581,39 +581,8 @@ public static class InputAndCommandHandling
 {
     public static async Task ProcessCommandAsync(string command)
     {
-        // 🌐 Handle continuation input for Wikipedia summary selection
-        if (Conversation.Current.AwaitingSelection && Conversation.Current.ActiveTopic == "wikipedia")
-        {
-            await WikipediaHandling.HandleSummarySelectionAsync(command);
-            return;
-        }
-
-        // 🧠 Handle Wikipedia search continuation (after "wiki" is issued)
-        if (Conversation.Current.ActiveTopic == "wikipedia" && !Conversation.Current.AwaitingSelection)
-        {
-            await WikipediaHandling.HandleWikipediaSearchAsync(command);
-            return;
-        }
-
-        // 🌤️ Weather and 🔎 Google still use StateFlags — for now
-        if (StateFlags.currentInputMode == StateFlags.InputMode.AwaitingInput)
-        {
-            if (StateFlags.currentInputContext == StateFlags.InputContext.Weather)
-            {
-                await InteractionHandling.HandleWeatherCommandAsync(command);
-            }
-            else if (StateFlags.currentInputContext == StateFlags.InputContext.GoogleSearch)
-            {
-                await GoogleSearchHandling.HandleGoogleSearchAsync(command);
-            }
-
-            // Reset old state flags
-            StateFlags.currentInputMode = StateFlags.InputMode.Normal;
-            StateFlags.currentInputContext = StateFlags.InputContext.None;
-            return;
-        }
-
-        // 🧭 Handle fresh command inputs
+        // Handle fresh command inputs
+        // wikipedia 
         if (command == "wiki")
         {
             // New conversation-based state — no more StateFlags
@@ -622,21 +591,47 @@ public static class InputAndCommandHandling
             await Utilities.WriteAndSpeakAsync("What would you like to search on Wikipedia?");
             return;
         }
+        else if (Conversation.Current.ActiveTopic == "wikipedia" && !Conversation.Current.AwaitingSelection)
+        {
+            await WikipediaHandling.HandleWikipediaSearchAsync(command);
+            return;
+        }
+        else if (Conversation.Current.AwaitingSelection && Conversation.Current.ActiveTopic == "wikipedia")
+        {
+            Console.WriteLine($"[Debug] AwaitingSelection={Conversation.Current.AwaitingSelection}, ActiveTopic={Conversation.Current.ActiveTopic}");
+            await WikipediaHandling.HandleSummarySelectionAsync(command);
+            return;
+        }
+        // weather 
         else if (command == "weather")
         {
-            // Still using StateFlags for now
-            StateFlags.currentInputMode = StateFlags.InputMode.AwaitingInput;
-            StateFlags.currentInputContext = StateFlags.InputContext.Weather;
+            Conversation.Current.ActiveTopic = "weather";
+            Conversation.Current.AwaitingSelection = false;
             await Utilities.WriteAndSpeakAsync("What city or zip code do you want the weather for?");
             return;
         }
+        else if (Conversation.Current.ActiveTopic == "weather" && !Conversation.Current.AwaitingSelection)
+        {
+            // This is where we receive the city or zip and handle it
+            await InteractionHandling.HandleWeatherCommandAsync(command);
+            Conversation.Current.Reset(); // Reset after we're done
+            return;
+        }
+        // google 
         else if (command == "google")
         {
-            StateFlags.currentInputMode = StateFlags.InputMode.AwaitingInput;
-            StateFlags.currentInputContext = StateFlags.InputContext.GoogleSearch;
+            Conversation.Current.ActiveTopic = "google";
+            Conversation.Current.AwaitingSelection = false;
             await Utilities.WriteAndSpeakAsync("What do you want to search?");
             return;
         }
+        else if (Conversation.Current.ActiveTopic == "google" && !Conversation.Current.AwaitingSelection)
+        {
+            await GoogleSearchHandling.HandleGoogleSearchAsync(command);
+            Conversation.Current.Reset();
+            return;
+        }
+        // other 
         else if (CommandHandling.CommandHandlers.TryGetValue(command, out Func<Task>? value))
         {
             await value(); // Handle other recognized commands
@@ -656,27 +651,16 @@ public static class InputAndCommandHandling
         {
             if (!StateFlags.IsEscapeHeld && !StateFlags.IsTyping)
             {
-                string? input;
+                StateFlags.IsTyping = true;
+                string? rawInput = Console.ReadLine();
+                StateFlags.IsTyping = false;
 
-                try
+                if (!string.IsNullOrWhiteSpace(rawInput))
                 {
-                    if (Console.KeyAvailable)
-                    {
-                        StateFlags.IsTyping = true;
-                        string? rawInput = Console.ReadLine();
+                    string input = Utilities.NormalizeCommand(rawInput);
+                    Console.WriteLine($"[Debug] Input: '{input}'");
 
-                        if (!string.IsNullOrWhiteSpace(rawInput))
-                        {
-                            input = Utilities.NormalizeCommand(rawInput);
-                            await ProcessCommandAsync(input);
-                        }
-                    }
-                    else
-                        continue;
-                }
-                finally
-                {
-                    StateFlags.IsTyping = false;
+                    await ProcessCommandAsync(input);
                 }
 
                 await Task.Delay(250);
@@ -1266,7 +1250,9 @@ public class WikipediaApiClient
     public async Task<string> GetSummaryForTitleAsync(string title)
     {
         string encodedTitle = Uri.EscapeDataString(title);
-        string url = $"https://en.wikipedia.org/api/rest_v1/pages/summary/{encodedTitle}";
+        string url = $"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&explaintext=1&titles={encodedTitle}";
+
+        Console.WriteLine($"[Debug] Wikipedia extract URL: {url}");
 
         HttpResponseMessage response = await _httpClient.GetAsync(url);
         response.EnsureSuccessStatusCode();
@@ -1274,11 +1260,20 @@ public class WikipediaApiClient
         string json = await response.Content.ReadAsStringAsync();
 
         using JsonDocument doc = JsonDocument.Parse(json);
-        // parses the json into a structured document we can query like a tree
-        if (doc.RootElement.TryGetProperty("extract", out JsonElement extractElement))
-            return extractElement.GetString() ?? "[No summary found.]";
-        else
-            return "[No summary available for this article.]";
+        var pages = doc.RootElement.GetProperty("query").GetProperty("pages");
+
+        foreach (JsonProperty page in pages.EnumerateObject())
+        {
+            JsonElement pageInfo = page.Value;
+
+            if (pageInfo.TryGetProperty("extract", out JsonElement extractElement))
+            {
+                string summary = extractElement.GetString() ?? "[No summary found.]";
+                Console.WriteLine($"[Debug] Retrieved summary: {summary.Substring(0, Math.Min(80, summary.Length))}...");
+                return summary;
+            }
+        }
+        return "[No summary available for this article.]";
     }
 }
 
@@ -1311,6 +1306,7 @@ public static class WikipediaHandling
     }
     public static async Task HandleSummarySelectionAsync(string input)
     {
+        Console.WriteLine($"[Debug] Entered HandleSummarySelectionAsync with input: {input}");
         var titles = Conversation.Current.PendingOptions;
 
         if (!int.TryParse(input, out int index) || index < 1 || index > titles.Count)
@@ -1320,33 +1316,51 @@ public static class WikipediaHandling
         }
 
         string selectedTitle = titles[index - 1];
+        Console.WriteLine($"[Debug] Selected title: {selectedTitle}");
+
         var client = new WikipediaApiClient();
+        Console.WriteLine("[Debug] Fetching summary from Wikipedia...");
         string summary = await client.GetSummaryForTitleAsync(selectedTitle);
 
         Console.WriteLine($"\n[{selectedTitle}]\n{summary}");
         await Utilities.WriteAndSpeakAsync($"Here is a summary of {selectedTitle}.");
+        Console.WriteLine($"[Debug] Retrieved summary: {(summary?.Substring(0, Math.Min(100, summary.Length)) ?? "null")}...");
 
         string path = $"{selectedTitle}.json";
 
         if (File.Exists(path))
         {
             string existingContent = File.ReadAllText(path);
-            if (!existingContent.Contains(summary))
+
+            try
             {
-                File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary }));
-                Console.WriteLine("[Updated] Saved new summary.");
+                var existingData = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(existingContent);
+                string? existingSummary = existingData != null && existingData.ContainsKey("Summary") ? existingData["Summary"] : null;
+
+                if (existingSummary != summary)
+                {
+                    File.WriteAllText(path,
+                        System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary },new JsonSerializerOptions { WriteIndented = true }));
+                    Console.WriteLine("[Updated] Saved new summary.");
+                }
+                else
+                {
+                    Console.WriteLine("[Skipped] Summary already up to date.");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                Console.WriteLine("[Skipped] Summary already up to date.");
+                Console.WriteLine($"[Error] Failed to parse existing JSON: {ex.Message}");
+                // Optionally, overwrite if broken:
+                File.WriteAllText(path,System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary },new JsonSerializerOptions { WriteIndented = true }));
+                Console.WriteLine("[Recovered] Overwrote corrupted JSON file.");
             }
         }
         else
         {
-            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary }));
+            File.WriteAllText(path,System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary },new JsonSerializerOptions { WriteIndented = true }));
             Console.WriteLine("[Saved] Summary saved for the first time.");
         }
-
         Conversation.Current.Reset();
     }
 }
