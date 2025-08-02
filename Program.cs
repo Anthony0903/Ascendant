@@ -652,22 +652,27 @@ public static class InputAndCommandHandling
             if (!StateFlags.IsEscapeHeld && !StateFlags.IsTyping)
             {
                 StateFlags.IsTyping = true;
-                string? rawInput = Console.ReadLine();
-                StateFlags.IsTyping = false;
 
-                if (!string.IsNullOrWhiteSpace(rawInput))
+                try
                 {
-                    string input = Utilities.NormalizeCommand(rawInput);
-                    Console.WriteLine($"[Debug] Input: '{input}'");
+                    string? rawInput = Console.ReadLine();
 
-                    await ProcessCommandAsync(input);
+                    if (!string.IsNullOrWhiteSpace(rawInput))
+                    {
+                        string input = Utilities.NormalizeCommand(rawInput);
+                        await ProcessCommandAsync(input);
+                    }
+                }
+                finally
+                {
+                    StateFlags.IsTyping = false;
                 }
 
-                await Task.Delay(250);
+                await Task.Delay(250); // slight pause before next input
             }
             else
             {
-                await Task.Delay(100);
+                await Task.Delay(100); // wait while Escape is held or typing is active
             }
         }
     }
@@ -692,30 +697,6 @@ public static class InputAndCommandHandling
                 Console.ResetColor();
 
                 await ProcessCommandAsync(command);
-
-                /*
-                // Only act on valid one-word commands
-                if (StateFlags.currentInputMode == StateFlags.InputMode.AwaitingInput)
-                {
-                    // Handle input manually here (for weather, google, etc.)
-                    StateFlags.currentInputMode = StateFlags.InputMode.Normal;
-                    await InteractionHandling.HandleWeatherCommandAsync(command);
-                }
-                else if (command == "weather")
-                {
-                    StateFlags.currentInputMode = StateFlags.InputMode.AwaitingInput;
-                    StateFlags.currentInputContext = StateFlags.InputContext.Weather;
-                    await Utilities.WriteAndSpeakAsync("Please say a city name or ZIP code.");
-                }
-                else if (CommandHandling.ValidCommands.Contains(command))
-                {
-                    await ProcessCommandAsync(command);
-                }
-                else
-                {
-                    await Utilities.WriteAndSpeakAsync($"[Error] [STT] Unknown command. I do not understand {command}");
-                }
-                */
             }
         };
 
