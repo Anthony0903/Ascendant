@@ -422,6 +422,48 @@ public static class InteractionHandling
 
 public static class GoogleSearchHandling
 {
+    public static float? LastOutput = null;
+    public static float[]? LastHiddenOutputs = null;
+    public static Dictionary<string, int>? LastTopWords = null;
+    public static string? LastQuery = null;
+
+    public static async Task HandleRelevanceFeedbackAsync(string input)
+    {
+        if (LastTopWords == null || LastHiddenOutputs == null || LastOutput == null || LastQuery == null)
+        {
+            await Utilities.WriteAndSpeakAsync("No recent search to provide feedback for.");
+            return;
+        }
+
+        float? expected = input switch
+        {
+            "1" or "relevant" => 1.0f,
+            "0.5" or "somewhat" => 0.5f,
+            "0" or "not" => 0.0f,
+            _ => null
+        };
+
+        if (expected == null)
+        {
+            await Utilities.WriteAndSpeakAsync("Input not recognized. Please type 1 / 0.5 / 0, or relevant / somewhat / not.");
+            return;
+        }
+
+        Conversation.Current.AwaitingRelevanceFeedback = false;
+
+        var inputs = LastTopWords.Values.Take(5).Select(v => (float)v).ToArray();
+        await SimpleNetwork.Instance.TrainBothLayersAsync(LastHiddenOutputs, expected.Value);
+
+        Console.WriteLine("\n[Neural Network Analysis]");
+        Console.WriteLine($"Calculated bias: -1.00");
+        Console.WriteLine($"Top words: {string.Join(", ", LastTopWords.Keys.Take(5))}");
+        Console.WriteLine($"Frequencies: {string.Join(", ", inputs)}");
+        Console.WriteLine("Neuron outputs: " + string.Join(", ", LastHiddenOutputs.Select(o => o.ToString("F3"))));
+        Console.WriteLine($"Final output neuron result: {LastOutput:F3}");
+
+        await Utilities.WriteAndSpeakAsync($"Hi AJ. Regarding your search \"{LastQuery}\", I’ve updated my understanding. Thank you ♥");
+    }
+
     public static async Task HandleGoogleSearchAsync(string query)
     {
         string url = $"https://www.googleapis.com/customsearch/v1?key={Configuration.GoogleApiKey}&cx={Configuration.SearchEngineId}&q={Uri.EscapeDataString(query)}";
@@ -564,7 +606,12 @@ public static class InputAndCommandHandling
 {
     public static async Task ProcessCommandAsync(string command)
     {
-        // Handle fresh command inputs
+        if (Conversation.Current.AwaitingRelevanceFeedback)
+        {
+            await GoogleSearchHandling.HandleRelevanceFeedbackAsync(command);
+            return;
+        }
+
         // wikipedia 
         if (command == "wiki")
         {
@@ -927,6 +974,16 @@ public class SimpleNeuron
 
     public static async Task RunNetworkOnTopWords(Dictionary<string, int> wordCounts, int snippetCount, string query)
     {
+        GoogleSearchHandling.LastOutput = finalOutput;
+        GoogleSearchHandling.LastHiddenOutputs = hiddenOutputs;
+        GoogleSearchHandling.LastTopWords = topWords;
+        GoogleSearchHandling.LastQuery = query;
+        Conversation.Current.AwaitingRelevanceFeedback = true;
+
+        await Utilities.WriteAndSpeakAsync($"How relevant are these top words to your search \"{query}\"?");
+        Console.WriteLine($"Words: {string.Join(", ", topWords.Select(p => p.Key))}");
+        Console.WriteLine("Type '1' or 'relevant', '0.5' or 'somewhat', '0' or 'not', then press Enter:");
+
         var topWords = wordCounts.OrderByDescending(pair => pair.Value).Take(5).ToList();
         // Extract their values (frequencies) into a list of inputs
         var inputs = topWords.Select(pair => (float)pair.Value).ToList();
@@ -951,36 +1008,6 @@ public class SimpleNeuron
         float finalOutput = network.RunOutputNeuron(hiddenOutputs);
 
         float expectedOutput;
-        while (true)
-        {
-            Conversation.Current.AwaitingRelevanceFeedback = true;
-            Console.WriteLine($"\nHow relevant are these top words to your search \"{query}\"?");
-            Console.WriteLine($"Words: {string.Join(", ", topWords.Select(p => p.Key))}");
-            Console.WriteLine("Type '1' or 'relevant', '0.5' or 'somewhat', '0' or 'not', then press Enter:");
-
-            string? input = Console.ReadLine()?.Trim().ToLower();
-
-            if (input == "1" || input == "relevant")
-            {
-                expectedOutput = 1.0f;
-                break;
-            }
-            else if (input == "0.5" || input == "somewhat")
-            {
-                expectedOutput = 0.5f;
-                break;
-            }
-            else if (input == "0" || input == "not")
-            {
-                expectedOutput = 0.0f;
-                break;
-            }
-            else
-            {
-                Console.WriteLine("Input not recognized. Please type 1 / 0.5 / 0, or relevant / somewhat / not.");
-            }
-        }
-        Conversation.Current.AwaitingRelevanceFeedback = false;
 
         await network.TrainBothLayersAsync(hiddenOutputs, expectedOutput);
 
