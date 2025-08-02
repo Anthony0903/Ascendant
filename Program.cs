@@ -1,3 +1,4 @@
+using Ascendant;
 using Microsoft.CognitiveServices.Speech;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -129,13 +130,12 @@ public static class Logger
 
 public static class Configuration
 {
-    public const string SpeechKey = "518877e21de64d7987bfa0ebc402674b";
-    public const string SpeechRegion = "eastus";
-    public const string WeatherApiKey = "Sx1OF3piASbTJyfXPVv0HJm65AWLnTV6";
-    public const string LocationKey = "337579"; // New Port Richey, FL
-    public const string BaseUrl = "http://dataservice.accuweather.com/";
-    public const string GoogleApiKey = "AIzaSyAKZU6DI8UofLwWywvU7Y80_StUe33ebhc";
-    public const string SearchEngineId = "f48ecbe965e9c4783"; // Replace with your actual Search Engine ID
+    public static string SpeechKey => ApiKeys.SpeechKey;
+    public static string SpeechRegion => ApiKeys.SpeechRegion;
+    public static string WeatherApiKey => ApiKeys.WeatherApiKey;
+    public static string LocationKey => ApiKeys.LocationKey;
+    public static string GoogleApiKey => ApiKeys.GoogleApiKey;
+    public static string SearchEngineId => ApiKeys.SearchEngineId;
 }
 
 public static class StateFlags
@@ -147,23 +147,6 @@ public static class StateFlags
 
     public static bool IsEscapeHeld = false; // Checks whether the escape key is currently held down 
     public static bool IsTyping = false; // Tracks if you're actively entering text input 
-
-    public enum InputMode // enum is a way to name a list of values 
-    {
-        Normal, // regular command mode 
-        AwaitingInput,
-        AwaitingSelection
-    }
-    public enum InputContext
-    {
-        None,
-        Weather,
-        GoogleSearch,
-        Wikipedia
-        // Add more later like Calculator, Email, etc.
-    }
-    public static InputMode currentInputMode = InputMode.Normal;
-    public static InputContext currentInputContext = InputContext.None;
 }
 
 public static class Utilities
@@ -649,30 +632,37 @@ public static class InputAndCommandHandling
     {
         while (true)
         {
-            if (!StateFlags.IsEscapeHeld && !StateFlags.IsTyping)
+            if (!StateFlags.IsEscapeHeld)
             {
-                StateFlags.IsTyping = true;
-
-                try
+                if (Console.KeyAvailable)
                 {
-                    string? rawInput = Console.ReadLine();
+                    StateFlags.IsTyping = true;
 
-                    if (!string.IsNullOrWhiteSpace(rawInput))
+                    try
                     {
-                        string input = Utilities.NormalizeCommand(rawInput);
-                        await ProcessCommandAsync(input);
-                    }
-                }
-                finally
-                {
-                    StateFlags.IsTyping = false;
-                }
+                        string? rawInput = Console.ReadLine();
 
-                await Task.Delay(250); // slight pause before next input
+                        if (!string.IsNullOrWhiteSpace(rawInput))
+                        {
+                            string input = Utilities.NormalizeCommand(rawInput);
+                            await ProcessCommandAsync(input);
+                        }
+                    }
+                    finally
+                    {
+                        StateFlags.IsTyping = false;
+                    }
+
+                    await Task.Delay(250);
+                }
+                else
+                {
+                    await Task.Delay(50); // small delay if no key yet
+                }
             }
             else
             {
-                await Task.Delay(100); // wait while Escape is held or typing is active
+                await Task.Delay(100); // Escape is held
             }
         }
     }
@@ -868,6 +858,7 @@ public static class BackgroundMonitors
                     }
 
                     // Console.WriteLine("[Loop] Logging temperature...");
+                    Console.WriteLine($"[Debug] {IsTyping}");
                     await Logger.LogTemperature();
                 }
 
@@ -962,6 +953,7 @@ public class SimpleNeuron
         float expectedOutput;
         while (true)
         {
+            Conversation.Current.AwaitingRelevanceFeedback = true;
             Console.WriteLine($"\nHow relevant are these top words to your search \"{query}\"?");
             Console.WriteLine($"Words: {string.Join(", ", topWords.Select(p => p.Key))}");
             Console.WriteLine("Type '1' or 'relevant', '0.5' or 'somewhat', '0' or 'not', then press Enter:");
@@ -988,6 +980,7 @@ public class SimpleNeuron
                 Console.WriteLine("Input not recognized. Please type 1 / 0.5 / 0, or relevant / somewhat / not.");
             }
         }
+        Conversation.Current.AwaitingRelevanceFeedback = false;
 
         await network.TrainBothLayersAsync(hiddenOutputs, expectedOutput);
 
@@ -1352,6 +1345,7 @@ public class ConversationState
     public string? LastSearchQuery { get; set; }
     public List<string> PendingOptions { get; set; } = new();
     public bool AwaitingSelection { get; set; } = false;
+    public bool AwaitingRelevanceFeedback { get; set; } = false;
 
     public void Reset()
     {
