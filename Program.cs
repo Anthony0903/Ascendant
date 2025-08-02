@@ -581,17 +581,21 @@ public static class InputAndCommandHandling
 {
     public static async Task ProcessCommandAsync(string command)
     {
+        // 🌐 Handle continuation input for Wikipedia summary selection
         if (Conversation.Current.AwaitingSelection && Conversation.Current.ActiveTopic == "wikipedia")
         {
             await WikipediaHandling.HandleSummarySelectionAsync(command);
             return;
         }
-        else if (Conversation.Current.ActiveTopic == "wikipedia" && !Conversation.Current.AwaitingSelection)
+
+        // 🧠 Handle Wikipedia search continuation (after "wiki" is issued)
+        if (Conversation.Current.ActiveTopic == "wikipedia" && !Conversation.Current.AwaitingSelection)
         {
             await WikipediaHandling.HandleWikipediaSearchAsync(command);
             return;
         }
 
+        // 🌤️ Weather and 🔎 Google still use StateFlags — for now
         if (StateFlags.currentInputMode == StateFlags.InputMode.AwaitingInput)
         {
             if (StateFlags.currentInputContext == StateFlags.InputContext.Weather)
@@ -603,15 +607,24 @@ public static class InputAndCommandHandling
                 await GoogleSearchHandling.HandleGoogleSearchAsync(command);
             }
 
-            // Reset after handling
+            // Reset old state flags
             StateFlags.currentInputMode = StateFlags.InputMode.Normal;
             StateFlags.currentInputContext = StateFlags.InputContext.None;
             return;
         }
 
-        // Check for weather command
-        if (command == "weather")
+        // 🧭 Handle fresh command inputs
+        if (command == "wiki")
         {
+            // New conversation-based state — no more StateFlags
+            Conversation.Current.ActiveTopic = "wikipedia";
+            Conversation.Current.AwaitingSelection = false;
+            await Utilities.WriteAndSpeakAsync("What would you like to search on Wikipedia?");
+            return;
+        }
+        else if (command == "weather")
+        {
+            // Still using StateFlags for now
             StateFlags.currentInputMode = StateFlags.InputMode.AwaitingInput;
             StateFlags.currentInputContext = StateFlags.InputContext.Weather;
             await Utilities.WriteAndSpeakAsync("What city or zip code do you want the weather for?");
@@ -624,17 +637,9 @@ public static class InputAndCommandHandling
             await Utilities.WriteAndSpeakAsync("What do you want to search?");
             return;
         }
-        // Handle other commands like start, stop, exit
         else if (CommandHandling.CommandHandlers.TryGetValue(command, out Func<Task>? value))
         {
-            await value(); // Handle other valid commands
-        }
-        else if (command == "wiki")
-        {
-            StateFlags.currentInputMode = StateFlags.InputMode.AwaitingInput;
-            StateFlags.currentInputContext = StateFlags.InputContext.Wikipedia;
-            await Utilities.WriteAndSpeakAsync("What would you like to search on Wikipedia?");
-            return;
+            await value(); // Handle other recognized commands
         }
         else
         {
@@ -663,13 +668,7 @@ public static class InputAndCommandHandling
                         if (!string.IsNullOrWhiteSpace(rawInput))
                         {
                             input = Utilities.NormalizeCommand(rawInput);
-
-                            if (input.Length >= 3)
-                            {
-                                await ProcessCommandAsync(input);
-                            }
-                            else
-                                await Utilities.WriteAndSpeakAsync($"[Error] [Read] Unknown command. I do not understand {input}");
+                            await ProcessCommandAsync(input);
                         }
                     }
                     else
@@ -1356,7 +1355,7 @@ public class ConversationState
 {
     public string? ActiveTopic { get; set; } // e.g., "wikipedia", "google"
     public string? LastSearchQuery { get; set; }
-    public List<string> PendingOptions { get; set; } = new(); 
+    public List<string> PendingOptions { get; set; } = new();
     public bool AwaitingSelection { get; set; } = false;
 
     public void Reset()
