@@ -45,7 +45,6 @@ class Program
         // allow the thread to terminate 
     }
 }
-
 public static class CommandHandling
 {
     public static readonly HashSet<string> ValidCommands = ["start", "stop", "open", "close", "weather",
@@ -74,7 +73,6 @@ public static class CommandHandling
     // the key is a string and the value is a function reference that returns a Task. dont need a bunch of 
     // if else statements 
 }
-
 public static class Logger
 {
     public static bool IsRunning = false;
@@ -127,7 +125,6 @@ public static class Logger
         }
     }
 }
-
 public static class Configuration
 {
     public static string SpeechKey => ApiKeys.SpeechKey;
@@ -137,7 +134,6 @@ public static class Configuration
     public static string GoogleApiKey => ApiKeys.GoogleApiKey;
     public static string SearchEngineId => ApiKeys.SearchEngineId;
 }
-
 public static class StateFlags
 {
     public static class Conversation
@@ -148,7 +144,6 @@ public static class StateFlags
     public static bool IsEscapeHeld = false; // Checks whether the escape key is currently held down 
     public static bool IsTyping = false; // Tracks if you're actively entering text input 
 }
-
 public static class Utilities
 {
     public static string NormalizeCommand(string input)
@@ -254,7 +249,6 @@ public static class Utilities
         }
     }
 }
-
 public static class NativeInterop
 // native interoperability is when managed C# code communicated with native code, like
 // windows system libraries written in C or C++ 
@@ -266,7 +260,6 @@ public static class NativeInterop
     // This function checks the state of a specific key (like Escape). It returns a short value indicating whether
     // the key is pressed or held down.
 }
-
 public static class InteractionHandling
 {
     static readonly Dictionary<string, double> Affection = new()
@@ -419,11 +412,55 @@ public static class InteractionHandling
         // StateFlags.currentInputMode = StateFlags.InputMode.Normal;
     }
 }
+public class ConversationState
+{
+    public string? ActiveTopic { get; set; } // e.g., "wikipedia", "google"
+    public string? LastSearchQuery { get; set; }
+    public List<string> PendingOptions { get; set; } = new();
+    public bool AwaitingSelection { get; set; } = false;
+    public bool AwaitingRelevanceFeedback { get; set; } = false;
 
-public static class GoogleSearchHandling
+    public void Reset()
+    {
+        ActiveTopic = null;
+        LastSearchQuery = null;
+        PendingOptions.Clear();
+        AwaitingSelection = false;
+    }
+}
+public static class NeuralNetworkManager
+{
+    public static SimpleNetwork Network { get; }
+
+    static NeuralNetworkManager()
+    {
+        var snapshot = SimpleNetwork.LoadSnapshot("weights_and_biases.json");
+
+        if (snapshot != null)
+        {
+            var weights = snapshot.Hidden.Select(h => h.Weights ?? new List<float>()).ToList();
+            var biases = snapshot.Hidden.Select(h => h.Bias ?? 0f).ToList();
+            Network = new SimpleNetwork(weights, biases, snapshot.Output.Weights, snapshot.Output.Bias);
+        }
+        else
+        {
+            var defaultWeights = new List<List<float>>
+            {
+                new() { 1f, 0.8f, 0.6f, 0.4f, 0.2f },
+                new() { 0.2f, 0.4f, 0.6f, 0.8f, 1f },
+                new() { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f },
+                new() { 0.3f, 0.7f, 0.2f, 0.6f, 0.4f },
+                new() { 0.9f, 0.1f, 0.3f, 0.7f, 0.5f }
+            };
+            var defaultBiases = Enumerable.Repeat(-2f, 5).ToList();
+            Network = new SimpleNetwork(defaultWeights, defaultBiases);
+        }
+    }
+}
+public static class RelevanceFeedbackHandler
 {
     public static float? LastOutput = null;
-    public static float[]? LastHiddenOutputs = null;
+    public static List<float>? LastHiddenOutputs = null;
     public static Dictionary<string, int>? LastTopWords = null;
     public static string? LastQuery = null;
 
@@ -452,10 +489,10 @@ public static class GoogleSearchHandling
         Conversation.Current.AwaitingRelevanceFeedback = false;
 
         var inputs = LastTopWords.Values.Take(5).Select(v => (float)v).ToArray();
-        await SimpleNetwork.Instance.TrainBothLayersAsync(LastHiddenOutputs, expected.Value);
+
+        await NeuralNetworkManager.Network.TrainBothLayersAsync(LastHiddenOutputs, expected.Value);
 
         Console.WriteLine("\n[Neural Network Analysis]");
-        Console.WriteLine($"Calculated bias: -1.00");
         Console.WriteLine($"Top words: {string.Join(", ", LastTopWords.Keys.Take(5))}");
         Console.WriteLine($"Frequencies: {string.Join(", ", inputs)}");
         Console.WriteLine("Neuron outputs: " + string.Join(", ", LastHiddenOutputs.Select(o => o.ToString("F3"))));
@@ -463,152 +500,14 @@ public static class GoogleSearchHandling
 
         await Utilities.WriteAndSpeakAsync($"Hi AJ. Regarding your search \"{LastQuery}\", I’ve updated my understanding. Thank you ♥");
     }
-
-    public static async Task HandleGoogleSearchAsync(string query)
-    {
-        string url = $"https://www.googleapis.com/customsearch/v1?key={Configuration.GoogleApiKey}&cx={Configuration.SearchEngineId}&q={Uri.EscapeDataString(query)}";
-        try
-        {
-            using var client = new HttpClient();
-            var response = await client.GetStringAsync(url);
-            var json = JObject.Parse(response);
-
-            var items = json["items"];
-            if (items is null)
-            {
-                await Utilities.WriteAndSpeakAsync("I couldn't find any results for that search.");
-                return;
-            }
-
-            List<string> snippets = new();
-            // int count = 0;
-            foreach (var item in items)
-            {
-                // string title = item["title"]?.ToString() ?? "(no title)";
-                string rawSnippet = item["snippet"]?.ToString() ?? "(no description)";
-                int lastPunctuation = Math.Max(rawSnippet.LastIndexOf('.'), rawSnippet.LastIndexOf('!'));
-                string snippet = (lastPunctuation >= 0) ? rawSnippet.Substring(0, lastPunctuation + 1) : rawSnippet;
-                // checks the last position of . or !, if found it keeps everything up to and including that punctuation, 
-                // if neither is found, it keeps the full snippet just in case. 
-                // string = if ? then : else OR string snippet = (condition) ? valueIfTrue : valueIfFalse;
-                // Math.Max compares two positions of last . and ! and returns the higher one, sets lastPunctuation equal
-                // to the that higher value. Substring returns everything before lastPunctuation + 1, to include . or ! 
-
-                snippets.Add(snippet); // adds snippet to list
-                // if (count >= 3) break; // Limit to 3 results
-            }
-            int snippetCount = snippets.Count;
-
-            // Use AI-like summarizer to find the best snippet
-            var (bestSnippet, wordCounts) = GoogleSummarySearch.GetBestSummaryFromSnippets(snippets);
-            await Utilities.WriteAndSpeakAsync($"Summary: {bestSnippet}");
-
-            // Optional: Show word frequency map
-            Console.WriteLine("[Word Frequency Map]");
-            foreach (var pair in wordCounts.OrderByDescending(p => p.Value).Take(10)) // returns top 10 words 
-            {
-                Console.WriteLine($"{pair.Key} : {pair.Value}");
-            }
-
-            // Google Search → Extract Snippets → Find Best Snippet + Word Frequencies→ Feed Top Word Frequencies
-            // into a Neuron → Get Interpreted Output
-
-            await SimpleNeuron.RunNetworkOnTopWords(wordCounts, snippetCount, query);
-        }
-        catch (Exception ex)
-        {
-            await Utilities.WriteAndSpeakAsync($"[Error] [GoogleSearch] {ex.Message}");
-        }
-    }
 }
-
-public static class GoogleSummarySearch
-{
-    private static List<string> Tokenize(string text)
-    {
-        return Regex.Matches(text.ToLower(), @"\b[a-z0-9]+\b").Cast<Match>().Select(m => m.Value).Where(w => w.Length > 1 || w == "a" || w == "i").ToList();
-        // Regex.Matches returns a MashCollection (special type that holds all the matched words, but does not
-        // behave like a normal list. you can loop over it, but its not LINQ friendly yet. .Cast<Match>() converts
-        // the MashCollection into a normal IEnumerable<Match> so you can use LINQ (like .Select, .Where, etc.). 
-        // .Select(m +> m.Value) turns the list of Match objects into a list of string values
-        // \b start of a word, [a-z0-9]+ one or more letters or numbers, \b end of a word
-    }
-    public static string StemWord(string word)
-    {
-        if (word.Length <= 3) return word;
-
-        if (word.EndsWith("ing") && word.Length > 4)
-            return word[..^3]; // remove "ing"
-        if (word.EndsWith("ed") && word.Length > 3)
-            return word[..^2]; // remove "ed"
-        if (word.EndsWith("es") && word.Length > 4)
-            return word[..^2]; // remove "es" instead of just "s"
-
-        return word;
-    }
-    public static (string bestSnippet, Dictionary<string, int> wordCounts) GetBestSummaryFromSnippets(IEnumerable<string> snippets)
-    // method accepts any collection of strings or anything that can be enumerated (looped through with foreach).
-    {
-        // List of common stop words to ignore — these are not useful for determining relevance
-        var stopWords = new HashSet<string>
-        {
-            "the", "and", "but", "in", "on", "of", "is", "a", "an", "to", "it", "for",
-            "that", "this", "with", "as", "by", "at", "from", "are", "was", "be", "or",
-            "if", "into", "out", "up", "down", "so", "about", "than", "too", "just",
-            "because", "can", "could", "would", "should", "will", "may", "might", "not", "also",
-            "we", "our", "you", "your", "their", "they", "them", "i", "me", "my"
-        };
-
-        // Tokenize all words from all snippets. Means to break text into individual pieces (tokens)
-        var allWords = new List<string>();
-        foreach (var snippet in snippets) // snippet is a search result snippet
-        {
-            var words = Tokenize(snippet);
-            // splits snippets into words, using the above as separators. StringSplitOptions.RemoveEmptyEntries prevents
-            // blank entries (like multiple spaces) from being included in the result
-            var stemmedWords = words.Select(StemWord);
-            allWords.AddRange(stemmedWords.Where(w => !stopWords.Contains(w)));
-            // adds only meaningful words from the current snippet to the allWords list
-        }
-        var wordCounts = allWords.GroupBy(w => w).ToDictionary(g => g.Key, g => g.Count());
-        // makes a dictionary: word is the key, frequency of that word is the value
-
-        // Score each snippet by total frequency of its words
-        string bestSnippet = string.Empty;
-        int bestScore = -1; // any valid score will be higher than this, so any match replaces it
-
-        foreach (var snippet in snippets)
-        {
-            var words = Tokenize(snippet);
-            // tokenize again in scoring loop because earlier we only built wordCounts, not which tokens belonged to which snippet
-            // we need to tokenize each snippet again now to calculate how relevant it is
-
-            var scoreWords = words.Select(StemWord);
-            int score = scoreWords
-                .Where(w => !stopWords.Contains(w)) // skip unimportant words again
-                .Sum(word => wordCounts.TryGetValue(word, out int count) ? count : 0);
-            // for each word in the snippet, it checks how often that word appeared across all snippets.
-            // adds those values together. higher score means this snippet uses common/important words more
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestSnippet = snippet;
-                // if the current snippet is more relevant, store it as the new best
-            }
-        }
-
-        return (bestSnippet, wordCounts); // return the snippet with the highest word frequency score
-    }
-}
-
 public static class InputAndCommandHandling
 {
     public static async Task ProcessCommandAsync(string command)
     {
         if (Conversation.Current.AwaitingRelevanceFeedback)
         {
-            await GoogleSearchHandling.HandleRelevanceFeedbackAsync(command);
+            await RelevanceFeedbackHandler.HandleRelevanceFeedbackAsync(command);
             return;
         }
 
@@ -766,7 +665,6 @@ public static class InputAndCommandHandling
         StateFlags.IsTyping = false;
     }
 }
-
 public static class FileOperations
 {
     public static async Task OpenLogFile()
@@ -829,7 +727,6 @@ public static class FileOperations
         }
     }
 }
-
 public static class BackgroundMonitors
 {
     public static async Task CheckEscapeHoldAsync()
@@ -923,7 +820,358 @@ public static class BackgroundMonitors
     // (isEscapeHeld or isTyping), writes the temperature data every second and controls the logic that handles
     // pause or resume and temperature writes 
 }
+public static class GoogleSearchHandling
+{
+    public static async Task HandleGoogleSearchAsync(string query)
+    {
+        string url = $"https://www.googleapis.com/customsearch/v1?key={Configuration.GoogleApiKey}&cx={Configuration.SearchEngineId}&q={Uri.EscapeDataString(query)}";
+        try
+        {
+            using var client = new HttpClient();
+            var response = await client.GetStringAsync(url);
+            var json = JObject.Parse(response);
 
+            var items = json["items"];
+            if (items is null)
+            {
+                await Utilities.WriteAndSpeakAsync("I couldn't find any results for that search.");
+                return;
+            }
+
+            List<string> snippets = new();
+            // int count = 0;
+            foreach (var item in items)
+            {
+                // string title = item["title"]?.ToString() ?? "(no title)";
+                string rawSnippet = item["snippet"]?.ToString() ?? "(no description)";
+                int lastPunctuation = Math.Max(rawSnippet.LastIndexOf('.'), rawSnippet.LastIndexOf('!'));
+                string snippet = (lastPunctuation >= 0) ? rawSnippet.Substring(0, lastPunctuation + 1) : rawSnippet;
+                // checks the last position of . or !, if found it keeps everything up to and including that punctuation, 
+                // if neither is found, it keeps the full snippet just in case. 
+                // string = if ? then : else OR string snippet = (condition) ? valueIfTrue : valueIfFalse;
+                // Math.Max compares two positions of last . and ! and returns the higher one, sets lastPunctuation equal
+                // to the that higher value. Substring returns everything before lastPunctuation + 1, to include . or ! 
+
+                snippets.Add(snippet); // adds snippet to list
+                // if (count >= 3) break; // Limit to 3 results
+            }
+            int snippetCount = snippets.Count;
+
+            // Use AI-like summarizer to find the best snippet
+            var (bestSnippet, wordCounts) = GoogleSummarySearch.GetBestSummaryFromSnippets(snippets);
+            await Utilities.WriteAndSpeakAsync($"Summary: {bestSnippet}");
+
+            Console.WriteLine("[Word Frequency Map]");
+            foreach (var pair in wordCounts.OrderByDescending(p => p.Value).Take(10))
+            {
+                Console.WriteLine($"{pair.Key} : {pair.Value}");
+            }
+
+            // Ask for feedback
+            await Utilities.WriteAndSpeakAsync($"How relevant are these top words to your search \"{query}\"?");
+            var top5 = wordCounts.OrderByDescending(p => p.Value).Take(5).Select(p => p.Key);
+            Console.WriteLine($"Words: {string.Join(", ", top5)}");
+            Console.WriteLine("Type '1' or 'relevant', '0.5' or 'somewhat', '0' or 'not':");
+
+            float expectedOutput;
+            while (true)
+            {
+                string? input = Console.ReadLine()?.Trim().ToLower();
+                if (input == "1" || input == "relevant") { expectedOutput = 1f; break; }
+                else if (input == "0.5" || input == "somewhat") { expectedOutput = 0.5f; break; }
+                else if (input == "0" || input == "not") { expectedOutput = 0f; break; }
+                else Console.WriteLine("Please enter 1 / 0.5 / 0");
+            }
+
+            // Train and analyze
+            await SimpleNetwork.RunNetworkOnTopWords(wordCounts, snippets.Count, query, expectedOutput);
+
+
+        }
+        catch (Exception ex)
+        {
+            await Utilities.WriteAndSpeakAsync($"[Error] [GoogleSearch] {ex.Message}");
+        }
+    }
+}
+public static class GoogleSummarySearch
+{
+    private static List<string> Tokenize(string text)
+    {
+        return Regex.Matches(text.ToLower(), @"\b[a-z0-9]+\b").Cast<Match>().Select(m => m.Value).Where(w => w.Length > 1 || w == "a" || w == "i").ToList();
+        // Regex.Matches returns a MashCollection (special type that holds all the matched words, but does not
+        // behave like a normal list. you can loop over it, but its not LINQ friendly yet. .Cast<Match>() converts
+        // the MashCollection into a normal IEnumerable<Match> so you can use LINQ (like .Select, .Where, etc.). 
+        // .Select(m +> m.Value) turns the list of Match objects into a list of string values
+        // \b start of a word, [a-z0-9]+ one or more letters or numbers, \b end of a word
+    }
+    public static string StemWord(string word)
+    {
+        if (word.Length <= 3) return word;
+
+        if (word.EndsWith("ing") && word.Length > 4)
+            return word[..^3]; // remove "ing"
+        if (word.EndsWith("ed") && word.Length > 3)
+            return word[..^2]; // remove "ed"
+        if (word.EndsWith("es") && word.Length > 4)
+            return word[..^2]; // remove "es" instead of just "s"
+
+        return word;
+    }
+    public static (string bestSnippet, Dictionary<string, int> wordCounts) GetBestSummaryFromSnippets(IEnumerable<string> snippets)
+    // method accepts any collection of strings or anything that can be enumerated (looped through with foreach).
+    {
+        // List of common stop words to ignore — these are not useful for determining relevance
+        var stopWords = new HashSet<string>
+        {
+            "the", "and", "but", "in", "on", "of", "is", "a", "an", "to", "it", "for",
+            "that", "this", "with", "as", "by", "at", "from", "are", "was", "be", "or",
+            "if", "into", "out", "up", "down", "so", "about", "than", "too", "just",
+            "because", "can", "could", "would", "should", "will", "may", "might", "not", "also",
+            "we", "our", "you", "your", "their", "they", "them", "i", "me", "my"
+        };
+
+        // Tokenize all words from all snippets. Means to break text into individual pieces (tokens)
+        var allWords = new List<string>();
+        foreach (var snippet in snippets) // snippet is a search result snippet
+        {
+            var words = Tokenize(snippet);
+            // splits snippets into words, using the above as separators. StringSplitOptions.RemoveEmptyEntries prevents
+            // blank entries (like multiple spaces) from being included in the result
+            var stemmedWords = words.Select(StemWord);
+            allWords.AddRange(stemmedWords.Where(w => !stopWords.Contains(w)));
+            // adds only meaningful words from the current snippet to the allWords list
+        }
+        var wordCounts = allWords.GroupBy(w => w).ToDictionary(g => g.Key, g => g.Count());
+        // makes a dictionary: word is the key, frequency of that word is the value
+
+        // Score each snippet by total frequency of its words
+        string bestSnippet = string.Empty;
+        int bestScore = -1; // any valid score will be higher than this, so any match replaces it
+
+        foreach (var snippet in snippets)
+        {
+            var words = Tokenize(snippet);
+            // tokenize again in scoring loop because earlier we only built wordCounts, not which tokens belonged to which snippet
+            // we need to tokenize each snippet again now to calculate how relevant it is
+
+            var scoreWords = words.Select(StemWord);
+            int score = scoreWords
+                .Where(w => !stopWords.Contains(w)) // skip unimportant words again
+                .Sum(word => wordCounts.TryGetValue(word, out int count) ? count : 0);
+            // for each word in the snippet, it checks how often that word appeared across all snippets.
+            // adds those values together. higher score means this snippet uses common/important words more
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestSnippet = snippet;
+                // if the current snippet is more relevant, store it as the new best
+            }
+        }
+
+        return (bestSnippet, wordCounts); // return the snippet with the highest word frequency score
+    }
+}
+public class WikipediaApiClient
+{
+    private readonly HttpClient _httpClient;
+    private const string BaseUrl = "https://en.wikipedia.org/w/api.php";
+
+    public WikipediaApiClient()
+    {
+        _httpClient = new HttpClient();
+    }
+    public async Task<List<string>> GetTopArticleTitlesAsync(string query)
+    {
+        string encodedQuery = Uri.EscapeDataString(query);
+        // new york becomes new%20york, so the url is valid and can be used in a web request
+        string url = $"https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srsearch={encodedQuery}&srlimit=5";
+
+        HttpResponseMessage response = await _httpClient.GetAsync(url);
+        response.EnsureSuccessStatusCode();
+        // throws an error is something went wrong, such as a 404 or 500 error
+
+        string json = await response.Content.ReadAsStringAsync();
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        // parses the json into a structured document we can query like a tree 
+        var titles = new List<string>();
+
+        foreach (var item in doc.RootElement
+                                .GetProperty("query")
+                                .GetProperty("search")
+                                .EnumerateArray())
+        {
+            string title = item.GetProperty("title").GetString() ?? "";
+            titles.Add(title);
+        }
+        return titles;
+    }
+
+    public async Task<string> GetSummaryForTitleAsync(string title)
+    {
+        string encodedTitle = Uri.EscapeDataString(title);
+        string url = $"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&explaintext=1&titles={encodedTitle}";
+
+        Console.WriteLine($"[Debug] Wikipedia extract URL: {url}");
+
+        HttpResponseMessage response = await _httpClient.GetAsync(url);
+        response.EnsureSuccessStatusCode();
+
+        string json = await response.Content.ReadAsStringAsync();
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        var pages = doc.RootElement.GetProperty("query").GetProperty("pages");
+
+        foreach (JsonProperty page in pages.EnumerateObject())
+        {
+            JsonElement pageInfo = page.Value;
+
+            if (pageInfo.TryGetProperty("extract", out JsonElement extractElement))
+            {
+                string summary = extractElement.GetString() ?? "[No summary found.]";
+                Console.WriteLine($"[Debug] Retrieved summary: {summary.Substring(0, Math.Min(80, summary.Length))}...");
+                return summary;
+            }
+        }
+        return "[No summary available for this article.]";
+    }
+}
+public static class WikipediaHandling
+{
+    public static List<string> PendingTitles = new();
+    public static async Task HandleWikipediaSearchAsync(string query)
+    {
+        var wikiClient = new WikipediaApiClient();
+        var titles = await wikiClient.GetTopArticleTitlesAsync(query);
+
+        if (titles.Count == 0)
+        {
+            await Utilities.WriteAndSpeakAsync("I couldn't find any articles for that search.");
+            return;
+        }
+
+        Console.WriteLine("Top 5 Wikipedia Article Titles:");
+        for (int i = 0; i < titles.Count; i++)
+        {
+            Console.WriteLine($"{i + 1}. {titles[i]}");
+        }
+
+        Conversation.Current.ActiveTopic = "wikipedia";
+        Conversation.Current.LastSearchQuery = query;
+        Conversation.Current.PendingOptions = titles;
+        Conversation.Current.AwaitingSelection = true;
+
+        await Utilities.WriteAndSpeakAsync("Please type the number of the article you'd like to read.");
+    }
+    public static async Task HandleSummarySelectionAsync(string input)
+    {
+        Console.WriteLine($"[Debug] Entered HandleSummarySelectionAsync with input: {input}");
+        var titles = Conversation.Current.PendingOptions;
+
+        if (!int.TryParse(input, out int index) || index < 1 || index > titles.Count)
+        {
+            await Utilities.WriteAndSpeakAsync("Invalid selection. Please try again.");
+            return;
+        }
+
+        string selectedTitle = titles[index - 1];
+        Console.WriteLine($"[Debug] Selected title: {selectedTitle}");
+
+        var client = new WikipediaApiClient();
+        Console.WriteLine("[Debug] Fetching summary from Wikipedia...");
+        string summary = await client.GetSummaryForTitleAsync(selectedTitle);
+
+        Console.WriteLine($"\n[{selectedTitle}]\n{summary}");
+        await Utilities.WriteAndSpeakAsync($"Here is a summary of {selectedTitle}.");
+        Console.WriteLine($"[Debug] Retrieved summary: {(summary?.Substring(0, Math.Min(100, summary.Length)) ?? "null")}...");
+
+        string path = $"{selectedTitle}.json";
+
+        if (File.Exists(path))
+        {
+            string existingContent = File.ReadAllText(path);
+
+            try
+            {
+                var existingData = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(existingContent);
+                string? existingSummary = existingData != null && existingData.ContainsKey("Summary") ? existingData["Summary"] : null;
+
+                if (existingSummary != summary)
+                {
+                    File.WriteAllText(path,
+                        System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary }, new JsonSerializerOptions { WriteIndented = true }));
+                    Console.WriteLine("[Updated] Saved new summary.");
+                }
+                else
+                {
+                    Console.WriteLine("[Skipped] Summary already up to date.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Error] Failed to parse existing JSON: {ex.Message}");
+                // Optionally, overwrite if broken:
+                File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary }, new JsonSerializerOptions { WriteIndented = true }));
+                Console.WriteLine("[Recovered] Overwrote corrupted JSON file.");
+            }
+        }
+        else
+        {
+            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary }, new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine("[Saved] Summary saved for the first time.");
+        }
+        Conversation.Current.Reset();
+    }
+
+    public static async Task HandleWikipediaRelevanceAsync(string query)
+    {
+        var wikiClient = new WikipediaApiClient();
+        var titles = await wikiClient.GetTopArticleTitlesAsync(query);
+
+        if (titles.Count == 0)
+        {
+            await Utilities.WriteAndSpeakAsync("I couldn't find any articles for that search.");
+            return;
+        }
+
+        var queryWords = StandardizeWords(query).ToHashSet();
+
+        Console.WriteLine("Title Relevance Scores:");
+        var scoredTitles = new List<(string Title, float Score)>();
+
+        foreach (var title in titles)
+        {
+            var titleWords = StandardizeWords(title).ToHashSet();
+            float score = CalculateJaccardSimilarity(queryWords, titleWords);
+            scoredTitles.Add((title, score));
+            Console.WriteLine($"- {title} → Score: {score:F3}");
+        }
+
+        var topTitle = scoredTitles.OrderByDescending(t => t.Score).First().Title;
+        await Utilities.WriteAndSpeakAsync($"The most relevant article appears to be: {topTitle}");
+    }
+    private static float CalculateJaccardSimilarity(HashSet<string> set1, HashSet<string> set2)
+    {
+        var intersection = set1.Intersect(set2).Count();
+        // counts how many words are in both sets (intersection) 
+        var union = set1.Union(set2).Count();
+        // counts how many unique words are in either set (union)
+        return union == 0 ? 0f : (float)intersection / union;
+        // if union is 0, return 0 to avoid division by zero, otherwise return the ratio of
+        // intersection to union
+    }
+    public static IEnumerable<string> StandardizeWords(string input)
+        // can move to utilities later if desired to reuse code. here for now for testing and to simplify 
+    {
+        return input
+            .ToLower()
+            .Split(new[] { ' ', '-', '_', ',', '.', ':', ';', '(', ')', '[', ']', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(word => word.TrimEnd('s')) // crude stemmer
+            .Where(word => word.Length > 1);
+    }
+}
 public class SimpleNeuron
 {
     // A list of weights — one for each input. These determine how strongly each input influences the output.
@@ -971,76 +1219,17 @@ public class SimpleNeuron
         // x = +5 → 0.993 (very strong signal)
     }
     // inputs * weights, products totaled, add bias, pass output into sigmoid function, output 0 to 1
-
-    public static async Task RunNetworkOnTopWords(Dictionary<string, int> wordCounts, int snippetCount, string query)
-    {
-        GoogleSearchHandling.LastOutput = finalOutput;
-        GoogleSearchHandling.LastHiddenOutputs = hiddenOutputs;
-        GoogleSearchHandling.LastTopWords = topWords;
-        GoogleSearchHandling.LastQuery = query;
-        Conversation.Current.AwaitingRelevanceFeedback = true;
-
-        await Utilities.WriteAndSpeakAsync($"How relevant are these top words to your search \"{query}\"?");
-        Console.WriteLine($"Words: {string.Join(", ", topWords.Select(p => p.Key))}");
-        Console.WriteLine("Type '1' or 'relevant', '0.5' or 'somewhat', '0' or 'not', then press Enter:");
-
-        var topWords = wordCounts.OrderByDescending(pair => pair.Value).Take(5).ToList();
-        // Extract their values (frequencies) into a list of inputs
-        var inputs = topWords.Select(pair => (float)pair.Value).ToList();
-
-        // example weights and a bias (same size as inputs)
-        var weightsPerNeuron = new List<List<float>>
-        {
-            new() { 1f, 0.8f, 0.6f, 0.4f, 0.2f },
-            new() { 0.2f, 0.4f, 0.6f, 0.8f, 1f },
-            new() { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f },
-            new() { 0.3f, 0.7f, 0.2f, 0.6f, 0.4f },
-            new() { 0.9f, 0.1f, 0.3f, 0.7f, 0.5f }
-        };
-        float baseBias = -10f;
-        float adjustedBias = baseBias / Math.Max(1, snippetCount); // avoids dividing by 0
-        // More data = more confidence in word frequencies.
-        // Less data = higher uncertainty = require stronger signals to activate.
-        var biases = Enumerable.Repeat(adjustedBias, 5).ToList();
-
-        var network = new SimpleNetwork(weightsPerNeuron, biases);
-        var hiddenOutputs = network.Activate(inputs);
-        float finalOutput = network.RunOutputNeuron(hiddenOutputs);
-
-        float expectedOutput;
-
-        await network.TrainBothLayersAsync(hiddenOutputs, expectedOutput);
-
-        Console.WriteLine("\n[Neural Network Analysis]");
-        Console.WriteLine($"Calculated bias: {adjustedBias:F2}");
-        Console.WriteLine($"Top words: {string.Join(", ", topWords.Select(p => p.Key))}");
-        // combines words into one string like "black, hole, dense".
-        Console.WriteLine($"Frequencies: {string.Join(", ", inputs)}");
-        // prints frequency values used as neuron inputs like " 11, 11, 5".
-        Console.WriteLine("Neuron outputs: " + string.Join(", ", hiddenOutputs.Select(o => o.ToString("F3"))));
-        // prints the neuron's result between 0 and 1 rounded to 3 decimal places like 0.993
-        Console.WriteLine($"Final output neuron result: {finalOutput:F3}");
-
-        // Interpret the output
-        string relevance = finalOutput switch
-        {
-            > 0.9f => "highly relevant", // if finalOutput is greater than 
-            > 0.5f => "somewhat relevant", // else if finalOutput is greater than 
-            _ => "not relevant" // else 
-        };
-        string topWordsString = string.Join(", ", topWords.Select(p => p.Key));
-        Console.WriteLine($"Hi AJ. Regarding your search \"{query}\", " +
-            $"I think the words {topWordsString} are {relevance}");
-        // {query} and adding it to the method parameter is the same as await GoogleSearchHandling.HandleGoogleSearchAsync(query);
-    }
 }
-
 public class SimpleNetwork
 // defines a neural network with one hidden layer (5 neurons)
 {
     private readonly List<SimpleNeuron> hiddenLayer; // lists the neurons in a hidden layer
     // readonly means once assigned, it can't be replaced 
     private readonly SimpleNeuron outputNeuron; // storing the output neuron inside the SimplyNetwork 
+    public static NetworkSnapshot? LoadSnapshot(string path = "weights_and_biases.json")
+    {
+        return NetworkStorage.Load(path);
+    }
 
     public SimpleNetwork(List<List<float>> weightsPerNeuron, List<float> biases, List<float>? outputWeights = null, float? outputBias = null) // list of lists because each neuron 
     // has its own set of weights, and a list of biases.the list has 1 list per neuron and 1 bias per neuron 
@@ -1048,16 +1237,14 @@ public class SimpleNetwork
         // Try to load a full snapshot first. if it exists, it reconstructs the hidden layer and the output
         // nueron using stored weights and biases. if successful, it skips the constructor's fallback logic, 
         // which would otherwise build the network from the provided weights and biases 
-        var snap = NetworkStorage.Load();
-        if (snap != null)
+        var snap = LoadSnapshot();
+        if (snap != null && snap.Hidden.Count > 0 && snap.Output?.Weights != null && snap.Output.Bias.HasValue)
         {
             hiddenLayer = snap.Hidden
                 .Select(h => new SimpleNeuron(h.Weights ?? new List<float>(), h.Bias ?? 0f))
                 .ToList();
 
-            var ow = snap.Output.Weights ?? new List<float>();
-            var ob = snap.Output.Bias ?? 0f;
-            outputNeuron = new SimpleNeuron(ow, ob);
+            outputNeuron = new SimpleNeuron(snap.Output.Weights, snap.Output.Bias.Value);
             return;
         }
 
@@ -1067,21 +1254,14 @@ public class SimpleNetwork
 
         hiddenLayer = new List<SimpleNeuron>(); // initializes the hidden layer list 
         for (int i = 0; i < weightsPerNeuron.Count; i++)
-        {
             hiddenLayer.Add(new SimpleNeuron(weightsPerNeuron[i], biases[i]));
-            // i-th weight list for neuron #0, i-th bias for neuron #0, creates new simpleNeuron with those weights and
-            // bias, adds that neuron to the network's internal list of neurons (hiddenLayer) 
-        }
-        var saved = NetworkStorage.Load(); // May still exist, used for fallback outputNeuron even if the hidden layer wasn't saved
+        // i-th weight list for neuron #0, i-th bias for neuron #0, creates new simpleNeuron with those weights and
+        // bias, adds that neuron to the network's internal list of neurons (hiddenLayer) 
 
         var defaultOutputWeights = new List<float> { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
         float defaultOutputBias = -1f;
 
-        outputNeuron = saved?.Output.Weights != null && saved.Output.Bias.HasValue
-            ? new SimpleNeuron(saved.Output.Weights, saved.Output.Bias.Value)
-            : new SimpleNeuron(outputWeights ?? defaultOutputWeights, outputBias ?? defaultOutputBias);
-        // If we’ve saved any weights and bias, use those. If not, use the ones passed into the network.
-        // And if those weren't provided either, then just go with our safe, hardcoded defaults
+        outputNeuron = new SimpleNeuron(outputWeights ?? defaultOutputWeights, outputBias ?? defaultOutputBias);
     }
 
     public List<float> Activate(List<float> inputs)
@@ -1160,14 +1340,60 @@ public class SimpleNetwork
 
         return actualOutput;
     }
-}
 
+    public static async Task RunNetworkOnTopWords(Dictionary<string, int> wordCounts, int snippetCount, string query, float expectedOutput)
+    {
+        var topWords = wordCounts.OrderByDescending(pair => pair.Value).Take(5).ToList();
+        var inputs = topWords.Select(pair => (float)pair.Value).ToList();
+
+        var weightsPerNeuron = new List<List<float>>
+        {
+            new() { 1f, 0.8f, 0.6f, 0.4f, 0.2f },
+            new() { 0.2f, 0.4f, 0.6f, 0.8f, 1f },
+            new() { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f },
+            new() { 0.3f, 0.7f, 0.2f, 0.6f, 0.4f },
+            new() { 0.9f, 0.1f, 0.3f, 0.7f, 0.5f }
+        };
+        float baseBias = -10f;
+        float adjustedBias = baseBias / Math.Max(1, snippetCount);
+        var biases = Enumerable.Repeat(adjustedBias, 5).ToList();
+
+        var network = new SimpleNetwork(weightsPerNeuron, biases);
+        var hiddenOutputs = network.Activate(inputs);
+        float finalOutput = network.RunOutputNeuron(hiddenOutputs);
+
+        // ✅ NOW assign values AFTER the outputs are available
+        RelevanceFeedbackHandler.LastOutput = finalOutput;
+        RelevanceFeedbackHandler.LastHiddenOutputs = hiddenOutputs.ToList();
+        RelevanceFeedbackHandler.LastTopWords = topWords.ToDictionary(pair => pair.Key, pair => pair.Value);
+        RelevanceFeedbackHandler.LastQuery = query;
+
+        // 🔄 Train the network
+        await network.TrainBothLayersAsync(RelevanceFeedbackHandler.LastHiddenOutputs, expectedOutput);
+
+        // 🧠 Show analysis
+        Console.WriteLine("\n[Neural Network Analysis]");
+        Console.WriteLine($"Calculated bias: {adjustedBias:F2}");
+        Console.WriteLine($"Top words: {string.Join(", ", topWords.Select(p => p.Key))}");
+        Console.WriteLine($"Frequencies: {string.Join(", ", inputs)}");
+        Console.WriteLine("Neuron outputs: " + string.Join(", ", hiddenOutputs.Select(o => o.ToString("F3"))));
+        Console.WriteLine($"Final output neuron result: {finalOutput:F3}");
+
+        string relevance = finalOutput switch
+        {
+            > 0.9f => "highly relevant",
+            > 0.5f => "somewhat relevant",
+            _ => "not relevant"
+        };
+        string topWordsString = string.Join(", ", topWords.Select(p => p.Key));
+        Console.WriteLine($"Hi AJ. Regarding your search \"{query}\", I think the words {topWordsString} are {relevance}");
+    }
+}
 public class NetworkSnapshot
 {
     public List<WeightsAndBiases> Hidden { get; set; } = new();
     public WeightsAndBiases Output { get; set; } = new();
 }
-
 public static class NetworkStorage
 {
     public const string SnapshotPath = "weights_and_biases.json";
@@ -1187,12 +1413,11 @@ public static class NetworkStorage
 
     public static NetworkSnapshot? Load(string filePath = SnapshotPath)
     {
-        if (!File.Exists(SnapshotPath)) return null;
+        if (!File.Exists(filePath)) return null;
         var json = File.ReadAllText(filePath);
         return System.Text.Json.JsonSerializer.Deserialize<NetworkSnapshot>(json);
     }
 }
-
 public class WeightsAndBiases
 {
     public List<float>? Weights { get; set; } // allows for json to read or write weights 
@@ -1209,176 +1434,5 @@ public class WeightsAndBiases
     {
         Weights = weights;
         Bias = bias;
-    }
-}
-
-public class WikipediaApiClient
-{
-    private readonly HttpClient _httpClient;
-    private const string BaseUrl = "https://en.wikipedia.org/w/api.php";
-
-    public WikipediaApiClient()
-    {
-        _httpClient = new HttpClient();
-    }
-    public async Task<List<string>> GetTopArticleTitlesAsync(string query)
-    {
-        string encodedQuery = Uri.EscapeDataString(query);
-        // new york becomes new%20york, so the url is valid and can be used in a web request
-        string url = $"https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srsearch={encodedQuery}&srlimit=5";
-
-        HttpResponseMessage response = await _httpClient.GetAsync(url);
-        response.EnsureSuccessStatusCode();
-        // throws an error is something went wrong, such as a 404 or 500 error
-
-        string json = await response.Content.ReadAsStringAsync();
-
-        using JsonDocument doc = JsonDocument.Parse(json);
-        // parses the json into a structured document we can query like a tree 
-        var titles = new List<string>();
-
-        foreach (var item in doc.RootElement
-                                .GetProperty("query")
-                                .GetProperty("search")
-                                .EnumerateArray())
-        {
-            string title = item.GetProperty("title").GetString() ?? "";
-            titles.Add(title);
-        }
-        return titles;
-    }
-
-    public async Task<string> GetSummaryForTitleAsync(string title)
-    {
-        string encodedTitle = Uri.EscapeDataString(title);
-        string url = $"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&explaintext=1&titles={encodedTitle}";
-
-        Console.WriteLine($"[Debug] Wikipedia extract URL: {url}");
-
-        HttpResponseMessage response = await _httpClient.GetAsync(url);
-        response.EnsureSuccessStatusCode();
-
-        string json = await response.Content.ReadAsStringAsync();
-
-        using JsonDocument doc = JsonDocument.Parse(json);
-        var pages = doc.RootElement.GetProperty("query").GetProperty("pages");
-
-        foreach (JsonProperty page in pages.EnumerateObject())
-        {
-            JsonElement pageInfo = page.Value;
-
-            if (pageInfo.TryGetProperty("extract", out JsonElement extractElement))
-            {
-                string summary = extractElement.GetString() ?? "[No summary found.]";
-                Console.WriteLine($"[Debug] Retrieved summary: {summary.Substring(0, Math.Min(80, summary.Length))}...");
-                return summary;
-            }
-        }
-        return "[No summary available for this article.]";
-    }
-}
-
-public static class WikipediaHandling
-{
-    public static List<string> PendingTitles = new();
-    public static async Task HandleWikipediaSearchAsync(string query)
-    {
-        var wikiClient = new WikipediaApiClient();
-        var titles = await wikiClient.GetTopArticleTitlesAsync(query);
-
-        if (titles.Count == 0)
-        {
-            await Utilities.WriteAndSpeakAsync("I couldn't find any articles for that search.");
-            return;
-        }
-
-        Console.WriteLine("Top 5 Wikipedia Article Titles:");
-        for (int i = 0; i < titles.Count; i++)
-        {
-            Console.WriteLine($"{i + 1}. {titles[i]}");
-        }
-
-        Conversation.Current.ActiveTopic = "wikipedia";
-        Conversation.Current.LastSearchQuery = query;
-        Conversation.Current.PendingOptions = titles;
-        Conversation.Current.AwaitingSelection = true;
-
-        await Utilities.WriteAndSpeakAsync("Please type the number of the article you'd like to read.");
-    }
-    public static async Task HandleSummarySelectionAsync(string input)
-    {
-        Console.WriteLine($"[Debug] Entered HandleSummarySelectionAsync with input: {input}");
-        var titles = Conversation.Current.PendingOptions;
-
-        if (!int.TryParse(input, out int index) || index < 1 || index > titles.Count)
-        {
-            await Utilities.WriteAndSpeakAsync("Invalid selection. Please try again.");
-            return;
-        }
-
-        string selectedTitle = titles[index - 1];
-        Console.WriteLine($"[Debug] Selected title: {selectedTitle}");
-
-        var client = new WikipediaApiClient();
-        Console.WriteLine("[Debug] Fetching summary from Wikipedia...");
-        string summary = await client.GetSummaryForTitleAsync(selectedTitle);
-
-        Console.WriteLine($"\n[{selectedTitle}]\n{summary}");
-        await Utilities.WriteAndSpeakAsync($"Here is a summary of {selectedTitle}.");
-        Console.WriteLine($"[Debug] Retrieved summary: {(summary?.Substring(0, Math.Min(100, summary.Length)) ?? "null")}...");
-
-        string path = $"{selectedTitle}.json";
-
-        if (File.Exists(path))
-        {
-            string existingContent = File.ReadAllText(path);
-
-            try
-            {
-                var existingData = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(existingContent);
-                string? existingSummary = existingData != null && existingData.ContainsKey("Summary") ? existingData["Summary"] : null;
-
-                if (existingSummary != summary)
-                {
-                    File.WriteAllText(path,
-                        System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary },new JsonSerializerOptions { WriteIndented = true }));
-                    Console.WriteLine("[Updated] Saved new summary.");
-                }
-                else
-                {
-                    Console.WriteLine("[Skipped] Summary already up to date.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Error] Failed to parse existing JSON: {ex.Message}");
-                // Optionally, overwrite if broken:
-                File.WriteAllText(path,System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary },new JsonSerializerOptions { WriteIndented = true }));
-                Console.WriteLine("[Recovered] Overwrote corrupted JSON file.");
-            }
-        }
-        else
-        {
-            File.WriteAllText(path,System.Text.Json.JsonSerializer.Serialize(new { Title = selectedTitle, Summary = summary },new JsonSerializerOptions { WriteIndented = true }));
-            Console.WriteLine("[Saved] Summary saved for the first time.");
-        }
-        Conversation.Current.Reset();
-    }
-}
-
-public class ConversationState
-{
-    public string? ActiveTopic { get; set; } // e.g., "wikipedia", "google"
-    public string? LastSearchQuery { get; set; }
-    public List<string> PendingOptions { get; set; } = new();
-    public bool AwaitingSelection { get; set; } = false;
-    public bool AwaitingRelevanceFeedback { get; set; } = false;
-
-    public void Reset()
-    {
-        ActiveTopic = null;
-        LastSearchQuery = null;
-        PendingOptions.Clear();
-        AwaitingSelection = false;
     }
 }
