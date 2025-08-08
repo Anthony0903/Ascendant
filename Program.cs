@@ -412,7 +412,7 @@ public static class InteractionHandling
         // StateFlags.currentInputMode = StateFlags.InputMode.Normal;
     }
 }
-public class ConversationState
+public static class ConversationState
 {
     public string? ActiveTopic { get; set; } // e.g., "wikipedia", "google"
     public string? LastSearchQuery { get; set; }
@@ -426,35 +426,6 @@ public class ConversationState
         LastSearchQuery = null;
         PendingOptions.Clear();
         AwaitingSelection = false;
-    }
-}
-public static class NeuralNetworkManager
-{
-    public static SimpleNetwork Network { get; }
-
-    static NeuralNetworkManager()
-    {
-        var snapshot = SimpleNetwork.LoadSnapshot("weights_and_biases.json");
-
-        if (snapshot != null)
-        {
-            var weights = snapshot.Hidden.Select(h => h.Weights ?? new List<float>()).ToList();
-            var biases = snapshot.Hidden.Select(h => h.Bias ?? 0f).ToList();
-            Network = new SimpleNetwork(weights, biases, snapshot.Output.Weights, snapshot.Output.Bias);
-        }
-        else
-        {
-            var defaultWeights = new List<List<float>>
-            {
-                new() { 1f, 0.8f, 0.6f, 0.4f, 0.2f },
-                new() { 0.2f, 0.4f, 0.6f, 0.8f, 1f },
-                new() { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f },
-                new() { 0.3f, 0.7f, 0.2f, 0.6f, 0.4f },
-                new() { 0.9f, 0.1f, 0.3f, 0.7f, 0.5f }
-            };
-            var defaultBiases = Enumerable.Repeat(-2f, 5).ToList();
-            Network = new SimpleNetwork(defaultWeights, defaultBiases);
-        }
     }
 }
 public static class RelevanceFeedbackHandler
@@ -525,12 +496,14 @@ public static class InputAndCommandHandling
             await WikipediaHandling.HandleWikipediaSearchAsync(command);
             return;
         }
+        /*
         else if (Conversation.Current.AwaitingSelection && Conversation.Current.ActiveTopic == "wikipedia")
         {
             Console.WriteLine($"[Debug] AwaitingSelection={Conversation.Current.AwaitingSelection}, ActiveTopic={Conversation.Current.ActiveTopic}");
             await WikipediaHandling.HandleSummarySelectionAsync(command);
             return;
         }
+        */
         // weather 
         else if (command == "weather")
         {
@@ -822,6 +795,41 @@ public static class BackgroundMonitors
 }
 public static class GoogleSearchHandling
 {
+    public static async Task RunNetworkOnTopWords(Dictionary<string, int> wordCounts, int snippetCount, string query, float expectedOutput)
+    {
+        var topWords = wordCounts.OrderByDescending(pair => pair.Value).Take(5).ToList();
+        var inputs = topWords.Select(pair => (float)pair.Value).ToList();
+        while (inputs.Count < 5) inputs.Add(0f); // Ensure input length
+
+        var network = NeuralNetworkManager.Network;
+        var hiddenOutputs = network.Activate(inputs);
+        float finalOutput = network.RunOutputNeuron(hiddenOutputs);
+
+        // ✅ NOW assign values AFTER the outputs are available
+        RelevanceFeedbackHandler.LastOutput = finalOutput;
+        RelevanceFeedbackHandler.LastHiddenOutputs = hiddenOutputs.ToList();
+        RelevanceFeedbackHandler.LastTopWords = topWords.ToDictionary(pair => pair.Key, pair => pair.Value);
+        RelevanceFeedbackHandler.LastQuery = query;
+
+        // 🔄 Train the network
+        await network.TrainBothLayersAsync(hiddenOutputs, expectedOutput);
+        await NetworkStorage.SaveAsync(network.HiddenNeurons, network.OutputNeuron);
+
+        Console.WriteLine("\n[Neural Network Analysis]");
+        Console.WriteLine($"Top words: {string.Join(", ", topWords.Select(p => p.Key))}");
+        Console.WriteLine($"Frequencies: {string.Join(", ", inputs)}");
+        Console.WriteLine("Neuron outputs: " + string.Join(", ", hiddenOutputs.Select(o => o.ToString("F3"))));
+        Console.WriteLine($"Final output neuron result: {finalOutput:F3}");
+
+        string relevance = finalOutput switch
+        {
+            > 0.9f => "highly relevant",
+            > 0.5f => "somewhat relevant",
+            _ => "not relevant"
+        };
+
+        Console.WriteLine($"Hi AJ. Regarding your search \"{query}\", I think the words {string.Join(", ", topWords.Select(p => p.Key))} are {relevance}.");
+    }
     public static async Task HandleGoogleSearchAsync(string query)
     {
         string url = $"https://www.googleapis.com/customsearch/v1?key={Configuration.GoogleApiKey}&cx={Configuration.SearchEngineId}&q={Uri.EscapeDataString(query)}";
@@ -884,7 +892,7 @@ public static class GoogleSearchHandling
             }
 
             // Train and analyze
-            await SimpleNetwork.RunNetworkOnTopWords(wordCounts, snippets.Count, query, expectedOutput);
+            await RunNetworkOnTopWords(wordCounts, snippets.Count, query, expectedOutput);
 
 
         }
@@ -1052,22 +1060,29 @@ public static class WikipediaHandling
             return;
         }
 
-        Console.WriteLine("Top 5 Wikipedia Article Titles:");
+        // Console.WriteLine("Top 5 Wikipedia Article Titles:");
         for (int i = 0; i < titles.Count; i++)
         {
-            Console.WriteLine($"{i + 1}. {titles[i]}");
+            // Console.WriteLine($"{i + 1}. {titles[i]}");
         }
 
+        /*
         Conversation.Current.ActiveTopic = "wikipedia";
         Conversation.Current.LastSearchQuery = query;
         Conversation.Current.PendingOptions = titles;
         Conversation.Current.AwaitingSelection = true;
 
         await Utilities.WriteAndSpeakAsync("Please type the number of the article you'd like to read.");
+        */
+
+        Conversation.Current.LastSearchQuery = query;
+        await WikipediaHandling.HandleWikipediaRelevanceAsync(Conversation.Current.LastSearchQuery ?? "");
     }
+
+    /*
     public static async Task HandleSummarySelectionAsync(string input)
-    {
-        Console.WriteLine($"[Debug] Entered HandleSummarySelectionAsync with input: {input}");
+    {  
+        // Console.WriteLine($"[Debug] Entered HandleSummarySelectionAsync with input: {input}");
         var titles = Conversation.Current.PendingOptions;
 
         if (!int.TryParse(input, out int index) || index < 1 || index > titles.Count)
@@ -1077,15 +1092,15 @@ public static class WikipediaHandling
         }
 
         string selectedTitle = titles[index - 1];
-        Console.WriteLine($"[Debug] Selected title: {selectedTitle}");
+        // Console.WriteLine($"[Debug] Selected title: {selectedTitle}");
 
         var client = new WikipediaApiClient();
-        Console.WriteLine("[Debug] Fetching summary from Wikipedia...");
+        // Console.WriteLine("[Debug] Fetching summary from Wikipedia...");
         string summary = await client.GetSummaryForTitleAsync(selectedTitle);
 
-        Console.WriteLine($"\n[{selectedTitle}]\n{summary}");
-        await Utilities.WriteAndSpeakAsync($"Here is a summary of {selectedTitle}.");
-        Console.WriteLine($"[Debug] Retrieved summary: {(summary?.Substring(0, Math.Min(100, summary.Length)) ?? "null")}...");
+        // Console.WriteLine($"\n[{selectedTitle}]\n{summary}");
+        // await Utilities.WriteAndSpeakAsync($"Here is a summary of {selectedTitle}.");
+        // Console.WriteLine($"[Debug] Retrieved summary: {(summary?.Substring(0, Math.Min(100, summary.Length)) ?? "null")}...");
 
         string path = $"{selectedTitle}.json";
 
@@ -1123,8 +1138,8 @@ public static class WikipediaHandling
             Console.WriteLine("[Saved] Summary saved for the first time.");
         }
         Conversation.Current.Reset();
-    }
-
+        }
+    */
     public static async Task HandleWikipediaRelevanceAsync(string query)
     {
         var wikiClient = new WikipediaApiClient();
@@ -1146,11 +1161,86 @@ public static class WikipediaHandling
             var titleWords = StandardizeWords(title).ToHashSet();
             float score = CalculateJaccardSimilarity(queryWords, titleWords);
             scoredTitles.Add((title, score));
-            Console.WriteLine($"- {title} → Score: {score:F3}");
+            Console.WriteLine($"- {title} ␦ Score: {score:F3}");
         }
 
-        var topTitle = scoredTitles.OrderByDescending(t => t.Score).First().Title;
-        await Utilities.WriteAndSpeakAsync($"The most relevant article appears to be: {topTitle}");
+        // 🌸 Top 5 scores as ANN inputs
+        var inputs = scoredTitles
+            .OrderByDescending(t => t.Score)
+            .Take(5)
+            .Select(t => t.Score)
+            .ToList();
+
+        while (inputs.Count < 5)
+            inputs.Add(0f);
+
+        Console.WriteLine("[Debug] ANN Inputs: " + string.Join(", ", inputs.Select(i => i.ToString("F3"))));
+
+        // 🌸 Run network: hidden → output
+        var network = NeuralNetworkManager.Network;
+        var hiddenOutputs = network.Activate(inputs);
+        float finalOutput = network.RunOutputNeuron(hiddenOutputs);
+
+        // 🌸 Store for feedback/training
+        RelevanceFeedbackHandler.LastOutput = finalOutput;
+        RelevanceFeedbackHandler.LastHiddenOutputs = hiddenOutputs;
+        RelevanceFeedbackHandler.LastTopWords = scoredTitles
+            .OrderByDescending(t => t.Score)
+            .Take(5)
+            .ToDictionary(p => p.Title, p => (int)(p.Score * 100)); // use % score as int
+        RelevanceFeedbackHandler.LastQuery = query;
+
+        // 🌸 Friendly output
+        string relevance = finalOutput switch
+        {
+            > 0.9f => "highly relevant",
+            > 0.5f => "somewhat relevant",
+            _ => "not relevant"
+        };
+
+        var top5Titles = scoredTitles
+            .OrderByDescending(t => t.Score)
+            .Take(5)
+            .Select(t => t.Title)
+            .ToList();
+
+        var outputWeights = network.OutputNeuron.weights;
+
+        // Calculate weighted influence of each title input
+        var influences = inputs
+            .Select((inputValue, i) => inputValue * outputWeights[i])
+            .ToList();
+
+        int mostInfluentialIndex = influences.IndexOf(influences.Max());
+        string mostInfluentialTitle = top5Titles[mostInfluentialIndex];
+
+        string topTitles = string.Join(", ", RelevanceFeedbackHandler.LastTopWords.Keys);
+        // Console.WriteLine($"Regarding your search \"{query}\", I think the titles {topTitles} are {relevance}.");
+        // await Utilities.WriteAndSpeakAsync($"I think the articles I found are {relevance} to your question.");
+
+        await Utilities.WriteAndSpeakAsync($"Of the articles I found, I believe \"{mostInfluentialTitle}\" contributed most to my answer.");
+
+        // 🌸 Feedback
+        Console.Write("Was this helpful? (y/n): ");
+        var feedback = Console.ReadLine()?.Trim().ToLower();
+
+        if (feedback == "y" || feedback == "n")
+        {
+            float expectedOutput = feedback == "y" ? 1f : 0f;
+
+            // 🌸 Only train based on the most influential input
+            var focusedInputs = new List<float> { 0f, 0f, 0f, 0f, 0f };
+            focusedInputs[mostInfluentialIndex] = inputs[mostInfluentialIndex]; // preserve value only for that input
+            Console.WriteLine($"[Training] Focusing on \"{mostInfluentialTitle}\" (index {mostInfluentialIndex}) with score {inputs[mostInfluentialIndex]:F3}");
+            await NeuralNetworkManager.Network.TrainBothLayersAsync(focusedInputs, expectedOutput);
+
+            // 💾 Save updated weights
+            await NetworkStorage.SaveAsync(
+                NeuralNetworkManager.Network.HiddenNeurons,
+                NeuralNetworkManager.Network.OutputNeuron);
+
+            Console.WriteLine("[Training] Thank you. I've learned from your feedback");
+        }
     }
     private static float CalculateJaccardSimilarity(HashSet<string> set1, HashSet<string> set2)
     {
@@ -1171,6 +1261,55 @@ public static class WikipediaHandling
             .Select(word => word.TrimEnd('s')) // crude stemmer
             .Where(word => word.Length > 1);
     }
+}
+
+#region Artifical Neural Network
+public static class NetworkStorage
+{
+    public const string SnapshotPath = "weights_and_biases.json";
+
+    public static async Task SaveAsync(List<SimpleNeuron> hiddenLayer, SimpleNeuron outputNeuron, string filePath = SnapshotPath)
+    {
+        var snap = new NetworkSnapshot
+        {
+            Hidden = hiddenLayer.Select(h => new WeightsAndBiases(h.weights, h.bias)).ToList(),
+            Output = new WeightsAndBiases(outputNeuron.weights, outputNeuron.bias)
+        };
+
+        var json = System.Text.Json.JsonSerializer.Serialize(snap, new JsonSerializerOptions { WriteIndented = true });
+
+        await File.WriteAllTextAsync(filePath, json);
+    }
+
+    public static NetworkSnapshot? Load(string filePath = SnapshotPath)
+    {
+        if (!File.Exists(filePath)) return null;
+        var json = File.ReadAllText(filePath);
+        return System.Text.Json.JsonSerializer.Deserialize<NetworkSnapshot>(json);
+    }
+}
+public class WeightsAndBiases
+{
+    public List<float>? Weights { get; set; } // allows for json to read or write weights 
+    public float? Bias { get; set; } // allows for json to read or write bias 
+    // get gets from json file while set writes to json file. json serialization needs get set to be public 
+
+    public WeightsAndBiases() { }
+    // default constructor that creates an empty object when loading from a file. json libraries sometimes need this when reconstructing an object step-by-step. when deserializing, it first creates a blank WeightsAndBiases(),
+    // then it fills in .Weights = [...] and .Bias = ... from the file, even though you might not call this manually, json does under the hood 
+
+    public WeightsAndBiases(List<float> weights, float bias)
+    // custom constructor for creating the object manually in code, pass in list of weights and
+    // a bias such as var wnb = new WeightsAndBiases(new List<float> {0.5f, 0.8f}, -1f); 
+    {
+        Weights = weights;
+        Bias = bias;
+    }
+}
+public class NetworkSnapshot
+{
+    public List<WeightsAndBiases> Hidden { get; set; } = new();
+    public WeightsAndBiases Output { get; set; } = new();
 }
 public class SimpleNeuron
 {
@@ -1223,6 +1362,9 @@ public class SimpleNeuron
 public class SimpleNetwork
 // defines a neural network with one hidden layer (5 neurons)
 {
+    public List<SimpleNeuron> HiddenNeurons => hiddenLayer;
+    public SimpleNeuron OutputNeuron => outputNeuron;
+
     private readonly List<SimpleNeuron> hiddenLayer; // lists the neurons in a hidden layer
     // readonly means once assigned, it can't be replaced 
     private readonly SimpleNeuron outputNeuron; // storing the output neuron inside the SimplyNetwork 
@@ -1340,99 +1482,42 @@ public class SimpleNetwork
 
         return actualOutput;
     }
-
-    public static async Task RunNetworkOnTopWords(Dictionary<string, int> wordCounts, int snippetCount, string query, float expectedOutput)
-    {
-        var topWords = wordCounts.OrderByDescending(pair => pair.Value).Take(5).ToList();
-        var inputs = topWords.Select(pair => (float)pair.Value).ToList();
-
-        var weightsPerNeuron = new List<List<float>>
-        {
-            new() { 1f, 0.8f, 0.6f, 0.4f, 0.2f },
-            new() { 0.2f, 0.4f, 0.6f, 0.8f, 1f },
-            new() { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f },
-            new() { 0.3f, 0.7f, 0.2f, 0.6f, 0.4f },
-            new() { 0.9f, 0.1f, 0.3f, 0.7f, 0.5f }
-        };
-        float baseBias = -10f;
-        float adjustedBias = baseBias / Math.Max(1, snippetCount);
-        var biases = Enumerable.Repeat(adjustedBias, 5).ToList();
-
-        var network = new SimpleNetwork(weightsPerNeuron, biases);
-        var hiddenOutputs = network.Activate(inputs);
-        float finalOutput = network.RunOutputNeuron(hiddenOutputs);
-
-        // ✅ NOW assign values AFTER the outputs are available
-        RelevanceFeedbackHandler.LastOutput = finalOutput;
-        RelevanceFeedbackHandler.LastHiddenOutputs = hiddenOutputs.ToList();
-        RelevanceFeedbackHandler.LastTopWords = topWords.ToDictionary(pair => pair.Key, pair => pair.Value);
-        RelevanceFeedbackHandler.LastQuery = query;
-
-        // 🔄 Train the network
-        await network.TrainBothLayersAsync(RelevanceFeedbackHandler.LastHiddenOutputs, expectedOutput);
-
-        // 🧠 Show analysis
-        Console.WriteLine("\n[Neural Network Analysis]");
-        Console.WriteLine($"Calculated bias: {adjustedBias:F2}");
-        Console.WriteLine($"Top words: {string.Join(", ", topWords.Select(p => p.Key))}");
-        Console.WriteLine($"Frequencies: {string.Join(", ", inputs)}");
-        Console.WriteLine("Neuron outputs: " + string.Join(", ", hiddenOutputs.Select(o => o.ToString("F3"))));
-        Console.WriteLine($"Final output neuron result: {finalOutput:F3}");
-
-        string relevance = finalOutput switch
-        {
-            > 0.9f => "highly relevant",
-            > 0.5f => "somewhat relevant",
-            _ => "not relevant"
-        };
-        string topWordsString = string.Join(", ", topWords.Select(p => p.Key));
-        Console.WriteLine($"Hi AJ. Regarding your search \"{query}\", I think the words {topWordsString} are {relevance}");
-    }
 }
-public class NetworkSnapshot
+public static class NeuralNetworkManager
 {
-    public List<WeightsAndBiases> Hidden { get; set; } = new();
-    public WeightsAndBiases Output { get; set; } = new();
-}
-public static class NetworkStorage
-{
-    public const string SnapshotPath = "weights_and_biases.json";
+    public static SimpleNetwork Network { get; }
 
-    public static async Task SaveAsync(List<SimpleNeuron> hiddenLayer, SimpleNeuron outputNeuron, string filePath = SnapshotPath)
+    static NeuralNetworkManager()
+    // static constructor runs once when the class is first accessed, initializes the Network property
     {
-        var snap = new NetworkSnapshot
+        var snapshot = NetworkStorage.Load("weights_and_biases.json");
+
+        if (snapshot != null)
         {
-            Hidden = hiddenLayer.Select(h => new WeightsAndBiases(h.weights, h.bias)).ToList(),
-            Output = new WeightsAndBiases(outputNeuron.weights, outputNeuron.bias)
-        };
-
-        var json = System.Text.Json.JsonSerializer.Serialize(snap, new JsonSerializerOptions { WriteIndented = true });
-
-        await File.WriteAllTextAsync(filePath, json);
-    }
-
-    public static NetworkSnapshot? Load(string filePath = SnapshotPath)
-    {
-        if (!File.Exists(filePath)) return null;
-        var json = File.ReadAllText(filePath);
-        return System.Text.Json.JsonSerializer.Deserialize<NetworkSnapshot>(json);
-    }
-}
-public class WeightsAndBiases
-{
-    public List<float>? Weights { get; set; } // allows for json to read or write weights 
-    public float? Bias { get; set; } // allows for json to read or write bias 
-    // get gets from json file while set writes to json file. json serialization needs get set to be public 
-
-    public WeightsAndBiases() { }
-    // default constructor that creates an empty object when loading from a file. json libraries sometimes need this when reconstructing an object step-by-step. when deserializing, it first creates a blank WeightsAndBiases(),
-    // then it fills in .Weights = [...] and .Bias = ... from the file, even though you might not call this manually, json does under the hood 
-
-    public WeightsAndBiases(List<float> weights, float bias)
-    // custom constructor for creating the object manually in code, pass in list of weights and
-    // a bias such as var wnb = new WeightsAndBiases(new List<float> {0.5f, 0.8f}, -1f); 
-    {
-        Weights = weights;
-        Bias = bias;
+            var weights = snapshot.Hidden.Select(h => h.Weights ?? new List<float>()).ToList();
+            var biases = snapshot.Hidden.Select(h => h.Bias ?? 0f).ToList();
+            Network = new SimpleNetwork(weights, biases, snapshot.Output.Weights, snapshot.Output.Bias);
+        }
+        else
+        {
+            var defaultWeights = new List<List<float>>
+            {
+                new() { 1f, 0.8f, 0.6f, 0.4f, 0.2f },
+                new() { 0.2f, 0.4f, 0.6f, 0.8f, 1f },
+                new() { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f },
+                new() { 0.3f, 0.7f, 0.2f, 0.6f, 0.4f },
+                new() { 0.9f, 0.1f, 0.3f, 0.7f, 0.5f }
+            };
+            var defaultBiases = Enumerable.Repeat(-2f, 5).ToList();
+            var defaultOutputWeights = new List<float> { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+            var defaultOutputBias = -1f;
+            Network = new SimpleNetwork(defaultWeights, defaultBiases, defaultOutputWeights, defaultOutputBias);
+        }
     }
 }
+#endregion
+
+// cleanup conversational code, ensure project is running as intended and not getting stuck 
+// integrate natural language processing layer, then advance to classifier neural network  
+// integrate neural network to answer query through wikipedia 
+// add neural network (public  class IntentAnalyzer)to determine intent (command, question, other) 
