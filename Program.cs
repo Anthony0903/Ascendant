@@ -8,6 +8,7 @@ using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using static InputAndCommandHandling;
 using static StateFlags;
 
 class Program
@@ -37,7 +38,7 @@ class Program
         // or handle the result 
 
         Console.WriteLine("Type 'start' to begin logging, 'stop' to pause, 'open' to open text file," +
-            " 'close' to close it, 'weather' for weather, 'affection' for affection, 'google' for google search " +
+            " 'close' to close it, 'weather' for weather, 'affection' for affection, " +
             "'time' for time, 'wiki' for wiki, or 'exit' to quit.");
 
         await Task.Delay(-1); // Keep the main thread alive. creates a task that doesn't complete until it's 
@@ -48,7 +49,7 @@ class Program
 public static class CommandHandling
 {
     public static readonly HashSet<string> ValidCommands = ["start", "stop", "open", "close", "weather",
-        "affection", "google", "time", "wiki", "exit"];
+        "affection", "time", "wiki", "exit"];
     // uses a has table internally, so it's faster compared to a list the longer it gets as lists check one at a
     // time. Can use .contains to check the hashset for a match 
     public static readonly Dictionary<string, Func<Task>> CommandHandlers = new()
@@ -150,7 +151,6 @@ public static class Utilities
     {
         return input.Trim().ToLower().TrimEnd('.', '!', '?');
     }
-
     public static async Task WriteAndSpeakAsync(string text)
     {
         if (text.Contains("[Error]"))
@@ -412,13 +412,15 @@ public static class InteractionHandling
         // StateFlags.currentInputMode = StateFlags.InputMode.Normal;
     }
 }
-public static class ConversationState
+public class ConversationState
 {
-    public string? ActiveTopic { get; set; } // e.g., "wikipedia", "google"
+    public string? ActiveTopic { get; set; }
     public string? LastSearchQuery { get; set; }
     public List<string> PendingOptions { get; set; } = new();
     public bool AwaitingSelection { get; set; } = false;
     public bool AwaitingRelevanceFeedback { get; set; } = false;
+    public string? RelevanceFeedbackTopic { get; set; }
+
 
     public void Reset()
     {
@@ -426,6 +428,8 @@ public static class ConversationState
         LastSearchQuery = null;
         PendingOptions.Clear();
         AwaitingSelection = false;
+        AwaitingRelevanceFeedback = false;
+        RelevanceFeedbackTopic = null;
     }
 }
 public static class RelevanceFeedbackHandler
@@ -434,43 +438,6 @@ public static class RelevanceFeedbackHandler
     public static List<float>? LastHiddenOutputs = null;
     public static Dictionary<string, int>? LastTopWords = null;
     public static string? LastQuery = null;
-
-    public static async Task HandleRelevanceFeedbackAsync(string input)
-    {
-        if (LastTopWords == null || LastHiddenOutputs == null || LastOutput == null || LastQuery == null)
-        {
-            await Utilities.WriteAndSpeakAsync("No recent search to provide feedback for.");
-            return;
-        }
-
-        float? expected = input switch
-        {
-            "1" or "relevant" => 1.0f,
-            "0.5" or "somewhat" => 0.5f,
-            "0" or "not" => 0.0f,
-            _ => null
-        };
-
-        if (expected == null)
-        {
-            await Utilities.WriteAndSpeakAsync("Input not recognized. Please type 1 / 0.5 / 0, or relevant / somewhat / not.");
-            return;
-        }
-
-        Conversation.Current.AwaitingRelevanceFeedback = false;
-
-        var inputs = LastTopWords.Values.Take(5).Select(v => (float)v).ToArray();
-
-        await NeuralNetworkManager.Network.TrainBothLayersAsync(LastHiddenOutputs, expected.Value);
-
-        Console.WriteLine("\n[Neural Network Analysis]");
-        Console.WriteLine($"Top words: {string.Join(", ", LastTopWords.Keys.Take(5))}");
-        Console.WriteLine($"Frequencies: {string.Join(", ", inputs)}");
-        Console.WriteLine("Neuron outputs: " + string.Join(", ", LastHiddenOutputs.Select(o => o.ToString("F3"))));
-        Console.WriteLine($"Final output neuron result: {LastOutput:F3}");
-
-        await Utilities.WriteAndSpeakAsync($"Hi AJ. Regarding your search \"{LastQuery}\", I’ve updated my understanding. Thank you ♥");
-    }
 }
 public static class InputAndCommandHandling
 {
@@ -478,12 +445,24 @@ public static class InputAndCommandHandling
     {
         if (Conversation.Current.AwaitingRelevanceFeedback)
         {
-            await RelevanceFeedbackHandler.HandleRelevanceFeedbackAsync(command);
-            return;
+            string topic = Conversation.Current.RelevanceFeedbackTopic ?? "";
+
+            if (topic == "wikipedia")
+            {
+                if (command.ToLowerInvariant() is "yes" or "no")
+                {
+                    bool wasHelpful = command.ToLowerInvariant() == "yes";
+                    await WikipediaHandling.HandleWikipediaRelevanceAsync(Conversation.Current.LastSearchQuery ?? "", wasHelpful);
+                    return;
+                }
+
+                await Utilities.WriteAndSpeakAsync("Please say yes or no.");
+                return;
+            }
         }
 
         // wikipedia 
-        if (command == "wiki")
+        else if (command == "wiki")
         {
             // New conversation-based state — no more StateFlags
             Conversation.Current.ActiveTopic = "wikipedia";
@@ -496,14 +475,12 @@ public static class InputAndCommandHandling
             await WikipediaHandling.HandleWikipediaSearchAsync(command);
             return;
         }
-        /*
         else if (Conversation.Current.AwaitingSelection && Conversation.Current.ActiveTopic == "wikipedia")
         {
-            Console.WriteLine($"[Debug] AwaitingSelection={Conversation.Current.AwaitingSelection}, ActiveTopic={Conversation.Current.ActiveTopic}");
-            await WikipediaHandling.HandleSummarySelectionAsync(command);
+            await WikipediaHandling.GetFullArticleForTitleAsync(command);
             return;
         }
-        */
+
         // weather 
         else if (command == "weather")
         {
@@ -519,20 +496,6 @@ public static class InputAndCommandHandling
             Conversation.Current.Reset(); // Reset after we're done
             return;
         }
-        // google 
-        else if (command == "google")
-        {
-            Conversation.Current.ActiveTopic = "google";
-            Conversation.Current.AwaitingSelection = false;
-            await Utilities.WriteAndSpeakAsync("What do you want to search?");
-            return;
-        }
-        else if (Conversation.Current.ActiveTopic == "google" && !Conversation.Current.AwaitingSelection)
-        {
-            await GoogleSearchHandling.HandleGoogleSearchAsync(command);
-            Conversation.Current.Reset();
-            return;
-        }
         // other 
         else if (CommandHandling.CommandHandlers.TryGetValue(command, out Func<Task>? value))
         {
@@ -543,10 +506,122 @@ public static class InputAndCommandHandling
             await Utilities.WriteAndSpeakAsync($"[Error] [Process] Unknown command. I do not understand {command}.");
         }
     }
-    // static can be called without an instance of the class. you don't need to create an object of the class
-    // containing this method to call it. A static method belongs to the class itself rather than an instance of the
-    // class. 
+    public static class QueryClassifier
+    {
+        // Utilities.NormalizeCommand => return input.Trim().ToLower().TrimEnd('.', '!', '?');
 
+        // Stop words (common words that don't carry meaning, used for filtering)
+        private static readonly HashSet<string> StopWords = new HashSet<string>
+        {
+            "the", "a", "an", "and", "but", "or", "to", "of", "in", "on", "with", "at", "for", "by", "as", "from", "it", "its",
+            "am", "is", "are", "was", "were", "be", "been", "being", "has", "have", "had", "do", "does", "did", "doing",
+            "he", "she", "they", "we", "you", "I", "me", "us", "him", "her",
+            "this", "that", "these", "those", "each", "every", "some", "any", "no",
+            "all", "both", "few", "more", "less", "much", "many", "several",
+            "oh", "ah", "wow", "hey",
+            "isn't", "aren't", "didn't", "don't", "doesn't", "wasn't", "weren't", "haven't", "hasn't", "I'm", "you're", "he's", "she's", "it's",
+            "just", "only", "really", "very", "too", "quite", "so", "now", "yet", "still", "ever", "again", "here", "there"
+        };
+
+        private static readonly HashSet<string> QuestionWords = new HashSet<string>
+        {
+            "what", "who", "how", "why", "when", "is", "are", "can", "does", "do"
+        };
+
+        public static List<string> ExtractMainKeywords(string query)
+        {
+            string normalizedQuery = Utilities.NormalizeCommand(query);  // Normalize the query to lowercase
+            var words = normalizedQuery.Split(' ');  // Split the query into words
+
+            // Filter out stop words and query words
+            var mainKeywords = words.Where(word => word.Length > 1 && !StopWords.Contains(word) && !QuestionWords.Contains(word))
+                                     .ToList();
+
+            return mainKeywords;
+        }
+
+        public static string ClassifyQuery(string query)
+        {
+            string normalizedQuery = Utilities.NormalizeCommand(query);
+
+            // Check for question words
+            var words = normalizedQuery.Split(' ');
+            foreach (var word in words)
+            {
+
+                if (QuestionWords.Contains(word))
+                {
+                    if (word == "what" || word == "who")
+                    {
+                        return "fact"; // Expecting a factual query, like "What is the weather?"
+                    }
+                    else if (word == "how" || word == "why" || word == "does" || word == "do")
+                    {
+                        return "explanation"; // Expecting a process explanation, like "How does photosynthesis work?"
+                    }
+                    else if (word == "is" || word == "can" || word == "are")
+                    {
+                        return "yesno"; // Expecting a yes/no question, like "Is it raining?"
+                    }
+                    else if (word == "when")
+                    {
+                        return "date"; // Expecting a time related question, like "when was the civil war"
+                    }
+                }
+            }
+
+            return "unknown"; // If no question word is found
+        }
+        public static float AdjustScoreBasedOnQueryType(float originalScore, string queryType, string title, string query)
+        {
+            float adjustedScore = originalScore;
+            title = title.ToLowerInvariant();
+
+            var mainKeywords = ExtractMainKeywords(query);
+            // Boost score based on the presence of main keywords in the title
+            foreach (var keyword in mainKeywords)
+            {
+                if (title.Contains(keyword))  // If the title contains the keyword
+                {
+                    adjustedScore *= 1.2f;  // Boost the score for relevant titles
+                }
+            }
+
+            // Define logic to adjust scores before multiplication
+            switch (queryType)
+            {
+                case "fact":
+                    // Boost for keywords that typically represent factual information
+                    if (title.Contains("capital") || title.Contains("location") || title.Contains("discovered") || title.Contains("name") || title.Contains("definition"))
+                        adjustedScore *= 1.3f; // Boost for factual queries
+                    break;
+
+                case "explanation":
+                    // Boost for titles focusing on explaining processes or mechanisms
+                    if (title.Contains("process") || title.Contains("mechanism") || title.Contains("cause") || title.Contains("function") || title.Contains("system"))
+                        adjustedScore *= 1.2f; // Boost for explanation-based queries
+                    break;
+
+                case "yesno":
+                    // For yes/no questions, boost for titles with definitive answers
+                    if (title.Contains("yes") || title.Contains("no") || title.Contains("true") || title.Contains("false") || title.Contains("allowed") || title.Contains("possible"))
+                        adjustedScore *= 1.1f; // Slightly increase for yes/no-related answers
+                    break;
+
+                case "date":
+                    // For date-related queries, boost for historical or time-based terms
+                    if (title.Contains("history") || title.Contains("date") || title.Contains("century") || title.Contains("era") || title.Contains("timeline"))
+                        adjustedScore *= 1.4f; // Boost for time-related queries
+                    break;
+
+                default:
+                    break;
+            }
+            // Console.WriteLine($"Query Type: {queryType}");  // Log the query type (fact, explanation, etc.)
+            // Console.WriteLine("Main Keywords: " + string.Join(", ", mainKeywords));
+            return adjustedScore;
+        }
+    }
     public static async Task ReadInputLoopAsync()
     {
         while (true)
@@ -585,7 +660,6 @@ public static class InputAndCommandHandling
             }
         }
     }
-
     public static async Task RecognizeSpeechWhileEscapeHeldAsync(CancellationToken token)
     { // CancellationToken is used to signal that a task should be cancelled 
         var config = SpeechConfig.FromSubscription(Configuration.SpeechKey, Configuration.SpeechRegion);
@@ -602,7 +676,7 @@ public static class InputAndCommandHandling
             {
                 string command = Utilities.NormalizeCommand(e.Result.Text);
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("[You said]: " + command);
+                Console.WriteLine(command);
                 Console.ResetColor();
 
                 await ProcessCommandAsync(command);
@@ -793,194 +867,6 @@ public static class BackgroundMonitors
     // (isEscapeHeld or isTyping), writes the temperature data every second and controls the logic that handles
     // pause or resume and temperature writes 
 }
-public static class GoogleSearchHandling
-{
-    public static async Task RunNetworkOnTopWords(Dictionary<string, int> wordCounts, int snippetCount, string query, float expectedOutput)
-    {
-        var topWords = wordCounts.OrderByDescending(pair => pair.Value).Take(5).ToList();
-        var inputs = topWords.Select(pair => (float)pair.Value).ToList();
-        while (inputs.Count < 5) inputs.Add(0f); // Ensure input length
-
-        var network = NeuralNetworkManager.Network;
-        var hiddenOutputs = network.Activate(inputs);
-        float finalOutput = network.RunOutputNeuron(hiddenOutputs);
-
-        // ✅ NOW assign values AFTER the outputs are available
-        RelevanceFeedbackHandler.LastOutput = finalOutput;
-        RelevanceFeedbackHandler.LastHiddenOutputs = hiddenOutputs.ToList();
-        RelevanceFeedbackHandler.LastTopWords = topWords.ToDictionary(pair => pair.Key, pair => pair.Value);
-        RelevanceFeedbackHandler.LastQuery = query;
-
-        // 🔄 Train the network
-        await network.TrainBothLayersAsync(hiddenOutputs, expectedOutput);
-        await NetworkStorage.SaveAsync(network.HiddenNeurons, network.OutputNeuron);
-
-        Console.WriteLine("\n[Neural Network Analysis]");
-        Console.WriteLine($"Top words: {string.Join(", ", topWords.Select(p => p.Key))}");
-        Console.WriteLine($"Frequencies: {string.Join(", ", inputs)}");
-        Console.WriteLine("Neuron outputs: " + string.Join(", ", hiddenOutputs.Select(o => o.ToString("F3"))));
-        Console.WriteLine($"Final output neuron result: {finalOutput:F3}");
-
-        string relevance = finalOutput switch
-        {
-            > 0.9f => "highly relevant",
-            > 0.5f => "somewhat relevant",
-            _ => "not relevant"
-        };
-
-        Console.WriteLine($"Hi AJ. Regarding your search \"{query}\", I think the words {string.Join(", ", topWords.Select(p => p.Key))} are {relevance}.");
-    }
-    public static async Task HandleGoogleSearchAsync(string query)
-    {
-        string url = $"https://www.googleapis.com/customsearch/v1?key={Configuration.GoogleApiKey}&cx={Configuration.SearchEngineId}&q={Uri.EscapeDataString(query)}";
-        try
-        {
-            using var client = new HttpClient();
-            var response = await client.GetStringAsync(url);
-            var json = JObject.Parse(response);
-
-            var items = json["items"];
-            if (items is null)
-            {
-                await Utilities.WriteAndSpeakAsync("I couldn't find any results for that search.");
-                return;
-            }
-
-            List<string> snippets = new();
-            // int count = 0;
-            foreach (var item in items)
-            {
-                // string title = item["title"]?.ToString() ?? "(no title)";
-                string rawSnippet = item["snippet"]?.ToString() ?? "(no description)";
-                int lastPunctuation = Math.Max(rawSnippet.LastIndexOf('.'), rawSnippet.LastIndexOf('!'));
-                string snippet = (lastPunctuation >= 0) ? rawSnippet.Substring(0, lastPunctuation + 1) : rawSnippet;
-                // checks the last position of . or !, if found it keeps everything up to and including that punctuation, 
-                // if neither is found, it keeps the full snippet just in case. 
-                // string = if ? then : else OR string snippet = (condition) ? valueIfTrue : valueIfFalse;
-                // Math.Max compares two positions of last . and ! and returns the higher one, sets lastPunctuation equal
-                // to the that higher value. Substring returns everything before lastPunctuation + 1, to include . or ! 
-
-                snippets.Add(snippet); // adds snippet to list
-                // if (count >= 3) break; // Limit to 3 results
-            }
-            int snippetCount = snippets.Count;
-
-            // Use AI-like summarizer to find the best snippet
-            var (bestSnippet, wordCounts) = GoogleSummarySearch.GetBestSummaryFromSnippets(snippets);
-            await Utilities.WriteAndSpeakAsync($"Summary: {bestSnippet}");
-
-            Console.WriteLine("[Word Frequency Map]");
-            foreach (var pair in wordCounts.OrderByDescending(p => p.Value).Take(10))
-            {
-                Console.WriteLine($"{pair.Key} : {pair.Value}");
-            }
-
-            // Ask for feedback
-            await Utilities.WriteAndSpeakAsync($"How relevant are these top words to your search \"{query}\"?");
-            var top5 = wordCounts.OrderByDescending(p => p.Value).Take(5).Select(p => p.Key);
-            Console.WriteLine($"Words: {string.Join(", ", top5)}");
-            Console.WriteLine("Type '1' or 'relevant', '0.5' or 'somewhat', '0' or 'not':");
-
-            float expectedOutput;
-            while (true)
-            {
-                string? input = Console.ReadLine()?.Trim().ToLower();
-                if (input == "1" || input == "relevant") { expectedOutput = 1f; break; }
-                else if (input == "0.5" || input == "somewhat") { expectedOutput = 0.5f; break; }
-                else if (input == "0" || input == "not") { expectedOutput = 0f; break; }
-                else Console.WriteLine("Please enter 1 / 0.5 / 0");
-            }
-
-            // Train and analyze
-            await RunNetworkOnTopWords(wordCounts, snippets.Count, query, expectedOutput);
-
-
-        }
-        catch (Exception ex)
-        {
-            await Utilities.WriteAndSpeakAsync($"[Error] [GoogleSearch] {ex.Message}");
-        }
-    }
-}
-public static class GoogleSummarySearch
-{
-    private static List<string> Tokenize(string text)
-    {
-        return Regex.Matches(text.ToLower(), @"\b[a-z0-9]+\b").Cast<Match>().Select(m => m.Value).Where(w => w.Length > 1 || w == "a" || w == "i").ToList();
-        // Regex.Matches returns a MashCollection (special type that holds all the matched words, but does not
-        // behave like a normal list. you can loop over it, but its not LINQ friendly yet. .Cast<Match>() converts
-        // the MashCollection into a normal IEnumerable<Match> so you can use LINQ (like .Select, .Where, etc.). 
-        // .Select(m +> m.Value) turns the list of Match objects into a list of string values
-        // \b start of a word, [a-z0-9]+ one or more letters or numbers, \b end of a word
-    }
-    public static string StemWord(string word)
-    {
-        if (word.Length <= 3) return word;
-
-        if (word.EndsWith("ing") && word.Length > 4)
-            return word[..^3]; // remove "ing"
-        if (word.EndsWith("ed") && word.Length > 3)
-            return word[..^2]; // remove "ed"
-        if (word.EndsWith("es") && word.Length > 4)
-            return word[..^2]; // remove "es" instead of just "s"
-
-        return word;
-    }
-    public static (string bestSnippet, Dictionary<string, int> wordCounts) GetBestSummaryFromSnippets(IEnumerable<string> snippets)
-    // method accepts any collection of strings or anything that can be enumerated (looped through with foreach).
-    {
-        // List of common stop words to ignore — these are not useful for determining relevance
-        var stopWords = new HashSet<string>
-        {
-            "the", "and", "but", "in", "on", "of", "is", "a", "an", "to", "it", "for",
-            "that", "this", "with", "as", "by", "at", "from", "are", "was", "be", "or",
-            "if", "into", "out", "up", "down", "so", "about", "than", "too", "just",
-            "because", "can", "could", "would", "should", "will", "may", "might", "not", "also",
-            "we", "our", "you", "your", "their", "they", "them", "i", "me", "my"
-        };
-
-        // Tokenize all words from all snippets. Means to break text into individual pieces (tokens)
-        var allWords = new List<string>();
-        foreach (var snippet in snippets) // snippet is a search result snippet
-        {
-            var words = Tokenize(snippet);
-            // splits snippets into words, using the above as separators. StringSplitOptions.RemoveEmptyEntries prevents
-            // blank entries (like multiple spaces) from being included in the result
-            var stemmedWords = words.Select(StemWord);
-            allWords.AddRange(stemmedWords.Where(w => !stopWords.Contains(w)));
-            // adds only meaningful words from the current snippet to the allWords list
-        }
-        var wordCounts = allWords.GroupBy(w => w).ToDictionary(g => g.Key, g => g.Count());
-        // makes a dictionary: word is the key, frequency of that word is the value
-
-        // Score each snippet by total frequency of its words
-        string bestSnippet = string.Empty;
-        int bestScore = -1; // any valid score will be higher than this, so any match replaces it
-
-        foreach (var snippet in snippets)
-        {
-            var words = Tokenize(snippet);
-            // tokenize again in scoring loop because earlier we only built wordCounts, not which tokens belonged to which snippet
-            // we need to tokenize each snippet again now to calculate how relevant it is
-
-            var scoreWords = words.Select(StemWord);
-            int score = scoreWords
-                .Where(w => !stopWords.Contains(w)) // skip unimportant words again
-                .Sum(word => wordCounts.TryGetValue(word, out int count) ? count : 0);
-            // for each word in the snippet, it checks how often that word appeared across all snippets.
-            // adds those values together. higher score means this snippet uses common/important words more
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestSnippet = snippet;
-                // if the current snippet is more relevant, store it as the new best
-            }
-        }
-
-        return (bestSnippet, wordCounts); // return the snippet with the highest word frequency score
-    }
-}
 public class WikipediaApiClient
 {
     private readonly HttpClient _httpClient;
@@ -1016,13 +902,33 @@ public class WikipediaApiClient
         }
         return titles;
     }
+    public async Task<string> GetFullArticleForTitleAsync(string title)
+    {
+        string encodedTitle = Uri.EscapeDataString(title);
+        string url = $"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&explaintext=1&titles={encodedTitle}";
 
+        HttpResponseMessage response = await _httpClient.GetAsync(url);
+        response.EnsureSuccessStatusCode();
+
+        string json = await response.Content.ReadAsStringAsync();
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        var pages = doc.RootElement.GetProperty("query").GetProperty("pages");
+
+        foreach (JsonProperty page in pages.EnumerateObject())
+        {
+            if (page.Value.TryGetProperty("extract", out JsonElement extractElement))
+            {
+                return extractElement.GetString() ?? "[No content found.]";
+            }
+        }
+
+        return "[No content available for this article.]";
+    }
     public async Task<string> GetSummaryForTitleAsync(string title)
     {
         string encodedTitle = Uri.EscapeDataString(title);
         string url = $"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&explaintext=1&titles={encodedTitle}";
-
-        Console.WriteLine($"[Debug] Wikipedia extract URL: {url}");
 
         HttpResponseMessage response = await _httpClient.GetAsync(url);
         response.EnsureSuccessStatusCode();
@@ -1066,22 +972,69 @@ public static class WikipediaHandling
             // Console.WriteLine($"{i + 1}. {titles[i]}");
         }
 
-        /*
         Conversation.Current.ActiveTopic = "wikipedia";
         Conversation.Current.LastSearchQuery = query;
         Conversation.Current.PendingOptions = titles;
-        Conversation.Current.AwaitingSelection = true;
+        // Conversation.Current.AwaitingSelection = true;
 
-        await Utilities.WriteAndSpeakAsync("Please type the number of the article you'd like to read.");
-        */
+        // await Utilities.WriteAndSpeakAsync("Please type the number of the article you'd like to read.");
 
-        Conversation.Current.LastSearchQuery = query;
         await WikipediaHandling.HandleWikipediaRelevanceAsync(Conversation.Current.LastSearchQuery ?? "");
     }
+    public static async Task GetFullArticleForTitleAsync(string input)
+    {
+        var titles = Conversation.Current.PendingOptions;
 
-    /*
+        if (!int.TryParse(input, out int index) || index < 1 || index > titles.Count)
+        {
+            await Utilities.WriteAndSpeakAsync("Invalid selection. Please try again.");
+            return;
+        }
+
+        string selectedTitle = titles[index - 1];
+        // Console.WriteLine($"[Debug] Selected title: {selectedTitle}");
+
+        var client = new WikipediaApiClient();
+        // Console.WriteLine("[Debug] Fetching summary from Wikipedia...");
+        string fullArticle = await client.GetFullArticleForTitleAsync(selectedTitle);
+
+        // Console.WriteLine($"\n[{selectedTitle}]\n{summary}");
+        // await Utilities.WriteAndSpeakAsync($"Here is a summary of {selectedTitle}.");
+        // Console.WriteLine($"[Debug] Retrieved summary: {(summary?.Substring(0, Math.Min(100, summary.Length)) ?? "null")}...");
+
+        string path = $"{selectedTitle}.json";
+
+        var articleData = new
+        {
+            Title = selectedTitle,
+            FullArticle = fullArticle
+        };
+
+        string newJson = System.Text.Json.JsonSerializer.Serialize(articleData, new JsonSerializerOptions { WriteIndented = true });
+
+        if (File.Exists(path))
+        {
+            string existingContent = File.ReadAllText(path);
+            if (existingContent != newJson)
+            {
+                File.WriteAllText(path, newJson);
+                Console.WriteLine("[Updated] Saved new full article.");
+            }
+            else
+            {
+                Console.WriteLine("[Skipped] Full article already up to date.");
+            }
+        }
+        else
+        {
+            File.WriteAllText(path, newJson);
+            Console.WriteLine("[Saved] Full article saved for the first time.");
+        }
+
+        Conversation.Current.Reset();
+    }
     public static async Task HandleSummarySelectionAsync(string input)
-    {  
+    {
         // Console.WriteLine($"[Debug] Entered HandleSummarySelectionAsync with input: {input}");
         var titles = Conversation.Current.PendingOptions;
 
@@ -1138,9 +1091,8 @@ public static class WikipediaHandling
             Console.WriteLine("[Saved] Summary saved for the first time.");
         }
         Conversation.Current.Reset();
-        }
-    */
-    public static async Task HandleWikipediaRelevanceAsync(string query)
+    }
+    public static async Task HandleWikipediaRelevanceAsync(string query, bool? feedback = null)
     {
         var wikiClient = new WikipediaApiClient();
         var titles = await wikiClient.GetTopArticleTitlesAsync(query);
@@ -1158,10 +1110,27 @@ public static class WikipediaHandling
 
         foreach (var title in titles)
         {
+            /*
             var titleWords = StandardizeWords(title).ToHashSet();
             float score = CalculateJaccardSimilarity(queryWords, titleWords);
             scoredTitles.Add((title, score));
             Console.WriteLine($"- {title} ␦ Score: {score:F3}");
+            */
+
+            var titleWords = StandardizeWords(title).ToHashSet();
+            float score = CalculateJaccardSimilarity(queryWords, titleWords);
+
+            // Adjust the score based on query type
+            string queryType = QueryClassifier.ClassifyQuery(query);
+            // Console.WriteLine(query);
+            // Console.WriteLine($"Query Type: {queryType}");  // Log to check if it's correctly classified as "fact"
+            float adjustedScore = QueryClassifier.AdjustScoreBasedOnQueryType(score, queryType, title, query);
+
+            scoredTitles.Add((title, adjustedScore));
+            Console.WriteLine($"[Debug] - {title} ␦ Adjusted Score: {score:F3}");
+            Console.WriteLine($"- {title} ␦ Adjusted Score: {adjustedScore:F3}");
+
+            // query classification, jaccard similarity, adjusts score of title, feeds as ann input 
         }
 
         // 🌸 Top 5 scores as ANN inputs
@@ -1218,30 +1187,52 @@ public static class WikipediaHandling
         // Console.WriteLine($"Regarding your search \"{query}\", I think the titles {topTitles} are {relevance}.");
         // await Utilities.WriteAndSpeakAsync($"I think the articles I found are {relevance} to your question.");
 
-        await Utilities.WriteAndSpeakAsync($"Of the articles I found, I believe \"{mostInfluentialTitle}\" contributed most to my answer.");
+        Conversation.Current.ActiveTopic = "wiki_feedback";
 
         // 🌸 Feedback
-        Console.Write("Was this helpful? (y/n): ");
-        var feedback = Console.ReadLine()?.Trim().ToLower();
+        await Utilities.WriteAndSpeakAsync($"Of the articles I found, I believe \"{mostInfluentialTitle}\" contributed most to my answer.");
+        Console.Write("Was this helpful? (yes/no): ");
 
-        if (feedback == "y" || feedback == "n")
-        {
-            float expectedOutput = feedback == "y" ? 1f : 0f;
-
-            // 🌸 Only train based on the most influential input
-            var focusedInputs = new List<float> { 0f, 0f, 0f, 0f, 0f };
-            focusedInputs[mostInfluentialIndex] = inputs[mostInfluentialIndex]; // preserve value only for that input
-            Console.WriteLine($"[Training] Focusing on \"{mostInfluentialTitle}\" (index {mostInfluentialIndex}) with score {inputs[mostInfluentialIndex]:F3}");
-            await NeuralNetworkManager.Network.TrainBothLayersAsync(focusedInputs, expectedOutput);
-
-            // 💾 Save updated weights
-            await NetworkStorage.SaveAsync(
-                NeuralNetworkManager.Network.HiddenNeurons,
-                NeuralNetworkManager.Network.OutputNeuron);
-
-            Console.WriteLine("[Training] Thank you. I've learned from your feedback");
-        }
+        Conversation.Current.AwaitingRelevanceFeedback = true;
+        Conversation.Current.RelevanceFeedbackTopic = "wikipedia";
     }
+    public static async Task HandleWikipediaRelevanceAsync(string query, bool wasHelpful)
+    {
+        if (RelevanceFeedbackHandler.LastTopWords == null)
+        {
+            await Utilities.WriteAndSpeakAsync("Sorry, I don’t have the previous article information to learn from.");
+            return;
+        }
+
+        var inputs = RelevanceFeedbackHandler.LastTopWords.Values
+            .Take(5)
+            .Select(score => (float)score / 100f)
+            .ToList();
+
+        var mostInfluentialTitle = RelevanceFeedbackHandler.LastTopWords.Keys.First(); // or store explicitly if needed
+        int mostInfluentialIndex = 0;
+
+        var focusedInputs = new List<float> { 0f, 0f, 0f, 0f, 0f };
+        focusedInputs[mostInfluentialIndex] = inputs[mostInfluentialIndex];
+
+        float expectedOutput = wasHelpful ? 1f : 0f;
+
+        Console.WriteLine($"[Training] Focusing on \"{mostInfluentialTitle}\" (index {mostInfluentialIndex}) with score {inputs[mostInfluentialIndex]:F3}");
+        await NeuralNetworkManager.Network.TrainBothLayersAsync(focusedInputs, expectedOutput);
+
+        await NetworkStorage.SaveAsync(
+            NeuralNetworkManager.Network.HiddenNeurons,
+            NeuralNetworkManager.Network.OutputNeuron);
+
+        Console.WriteLine("[Training] Thank you. I've learned from your feedback");
+
+        await GetFullArticleForTitleAsync((mostInfluentialIndex + 1).ToString());
+
+        // Clear feedback state
+        Conversation.Current.AwaitingRelevanceFeedback = false;
+        Conversation.Current.RelevanceFeedbackTopic = null;
+    }
+
     private static float CalculateJaccardSimilarity(HashSet<string> set1, HashSet<string> set2)
     {
         var intersection = set1.Intersect(set2).Count();
@@ -1253,7 +1244,7 @@ public static class WikipediaHandling
         // intersection to union
     }
     public static IEnumerable<string> StandardizeWords(string input)
-        // can move to utilities later if desired to reuse code. here for now for testing and to simplify 
+    // can move to utilities later if desired to reuse code. here for now for testing and to simplify 
     {
         return input
             .ToLower()
@@ -1517,7 +1508,25 @@ public static class NeuralNetworkManager
 }
 #endregion
 
-// cleanup conversational code, ensure project is running as intended and not getting stuck 
-// integrate natural language processing layer, then advance to classifier neural network  
+// enhance natural language processing layer, then advance to classifier neural network  
 // integrate neural network to answer query through wikipedia 
 // add neural network (public  class IntentAnalyzer)to determine intent (command, question, other) 
+
+/*
+    public static string NormalizeCommand(string input)
+    {
+        return input.Trim().ToLower().TrimEnd('.', '!', '?');
+    }
+
+    and this code, can later expand and combine perhaps 
+
+    public static IEnumerable<string> StandardizeWords(string input)
+    // can move to utilities later if desired to reuse code. here for now for testing and to simplify 
+    {
+        return input
+            .ToLower()
+            .Split(new[] { ' ', '-', '_', ',', '.', ':', ';', '(', ')', '[', ']', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(word => word.TrimEnd('s')) // crude stemmer
+            .Where(word => word.Length > 1);
+    }
+*/
